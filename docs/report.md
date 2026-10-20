@@ -13,7 +13,7 @@ for people is the caller's; page-assay never writes a sentence meant for a perso
 |---|---|---|
 | **Static rules** | Read the page's source files without running them: code or data that would reach another host (`<script src>`, `fetch`, dynamic `import()`, `<link>`, form actions), and similar rules that need no browser. | The files. |
 | **Load** | Open the page in a browser driven over the Chrome DevTools Protocol, wait until it has **settled**, and collect what went wrong while it loaded. | A page served on an origin of its own (for example a [local-origin](https://github.com/iyulab/local-origin) preview origin) and a browser: one page-assay launches (headless Edge or Chrome), or **an existing CDP endpoint the caller already owns** (an embedded WebView2, a browser the caller started). |
-| **Look** | After it settled: does something cover the page (an element over most of the viewport that the page did not ask for), is the visible text in the script the caller expects, does the visible text stand out from what is behind it? | The loaded page. |
+| **Look** | After it settled: does something cover the page (an element over most of the viewport that the page did not ask for), is the visible text in the script the caller expects, does the visible text stand out from what is behind it, does every field have a name? | The loaded page. |
 | **Interact** | Optional steps the caller supplies — press this, type that, expect this — each judged by what the page shows afterwards. A step that does nothing observable is a finding (a page can fail silently: a button that does nothing raises no error). | Steps from the caller. Their vocabulary is a later design. |
 
 ## The report
@@ -43,6 +43,7 @@ Every finding has a `kind` and the fields that kind needs. Fields absent from a 
 | `covering` | An element covers the page. | `selector`, `area` (fraction of the viewport, 0–1) |
 | `language` | The visible text is mostly in another script than the caller expects. | `expected`, `observed`, `ratio` |
 | `text-contrast` | Visible text does not stand out enough from what is behind it (WCAG 2.x: 4.5:1, 3:1 for large text). Text over a picture or a gradient is skipped, not guessed. | `selector`, `text`, `foreground`, `background`, `ratio`, `needed`, `count` (elements with the same pair) |
+| `unnamed-field` | A visible input, select or text area has no name a screen reader can read (no label, `aria-label`, `aria-labelledby` or `title`; a placeholder counts for inputs). | `selector`, `nearText`? (the text beside it, for choosing a name) |
 | `interaction` | A caller's step did not have its expected effect. | `step` (the step's index), `expected`, `observed` |
 
 Shared fields:
@@ -68,7 +69,7 @@ done at once); settling is what makes `phase` and `settledMs` mean something.
 
 The browser half collects errors through the page's origin rather than re-implementing collection: a local-origin preview origin
 already places a problem-report script in front of the page and maps lines to the page's own file. page-assay reads those reports
-and adds what only a driver sees (settling, covering, language, text contrast, interaction, resources that never arrived). local-origin's
+and adds what only a driver sees (settling, covering, language, text contrast, unnamed fields, interaction, resources that never arrived). local-origin's
 `load-error` and `error` become `uncaught` / `rejection` / `console-error` with `phase` `load` or `use`; its `blocked` is `blocked`.
 
 ## Open questions
