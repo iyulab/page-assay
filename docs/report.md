@@ -65,6 +65,40 @@ A page has **settled** when it has loaded, no request it started is still pendin
 a short quiet period. A fixed wait after `load` is both too short (a page that fetches its data) and too long (a page that is
 done at once); settling is what makes `phase` and `settledMs` mean something.
 
+## The context a run states
+
+A page behaves differently in the window a person uses than in a driven browser, and a check that passes in the second can hide a defect
+in the first (a service worker that freezes a page at its first version is invisible to a driver that blocks workers; a policy the driver
+does not apply lets a page through that the window would break). page-assay therefore (a) **states the context it ran in** and (b)
+**follows the caller's real window wherever it can**, and says where it cannot.
+
+The report carries a `context` block:
+
+```jsonc
+"context": {
+  "engine": "Chromium 130.0",         // name and version of the driven browser
+  "headless": true,
+  "origin": "http",                    // "http" (a page served on an origin of its own) or "file" — never silently the second
+  "policy": "sha256:…",                // the response policy the page was served under, or null when none
+  "serviceWorkers": "allow",           // "allow" or "block"
+  "viewports": [ { "width": 1280, "height": 800, "scale": 1 } ],
+  "colorSchemes": [ "light", "dark" ],
+  "returningVisit": true               // the page was loaded a second time in the same storage
+}
+```
+
+| Aspect | Stance |
+|---|---|
+| **Origin** | An origin of its own, as the person's window has; `file:` is a different origin kind (module scripts, `fetch` of a relative file, root-relative URLs and storage all behave differently) and is reported as such, never used silently in its place. |
+| **Response policy** | An **input from the caller**. page-assay carries no copy of any product's policy: a hand-copied policy drifts, and the drift is felt as a page that passes here and breaks there (or the reverse). The report names the policy it ran under. |
+| **Service workers** | Allowed by default. A page that registers one is a finding (`service-worker`): a cached page the person cannot tell is stale is a defect no later check can see. A caller whose window forbids workers says so, and the run blocks them. |
+| **Network** | None beyond the page's own origin; every other request is refused and listed as `blocked`. |
+| **Storage** | A fresh profile, and — on request — a second load in the same storage (`returningVisit`), which exercises the paths a first visit never takes. |
+| **Viewport and colour scheme** | A list the caller supplies; the default is the caller's window size and one narrower, in light and dark. An unreadable dark page or a layout broken at a narrower width is a common defect of generated pages. |
+| **Navigation away** | Reported (`navigated`, with the target), not followed — a window that cancels it will not show what the driver would have followed. |
+| **Dialogs** | Answered the way the caller says and listed; a person may answer otherwise. |
+| **Engine, headless, GPU** | A known limit: stated in `context`, not emulated. A page that needs the GPU is not proven by a headless run. |
+
 ## Where findings come from
 
 The browser half collects errors through the page's origin rather than re-implementing collection: a local-origin preview origin
@@ -84,3 +118,5 @@ and adds what only a driver sees (settling, covering, language, text contrast, u
    needs a cursor ("findings since N") or a stream.
 4. **Limits.** local-origin keeps 20 entries per preview; page-assay keeps its own cap (proposal: 50) and sets `truncated`.
 5. **Interaction steps** — their vocabulary is the next design, after the report settles.
+6. **A context it cannot match.** When the caller asks for a context the driver cannot give (a different engine, a real GPU), does the run fail, or run and state the difference in `context`? Proposal: run, and state it — the caller decides whether the difference matters.
+7. **Where the policy comes from.** The caller passes the policy it serves with (as headers, or a reference the origin library can resolve). Whether page-assay reads it from the origin it drives or takes it as a parameter depends on the first open question above.
