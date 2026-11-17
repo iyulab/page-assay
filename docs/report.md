@@ -3,15 +3,17 @@
 > Status: **draft for review** — the first design of what page-assay returns. Nothing implements it yet. Comments on the
 > shape are welcome before the first code lands; the open questions are at the end.
 
-page-assay checks a web page without AI and returns **data, never prose**: a list of findings a program can act on — show a
-person what is wrong, hand the findings to whatever repairs the page, or decide that a page is good enough to publish. Wording
-for people is the caller's; page-assay never writes a sentence meant for a person to read.
+page-assay checks a web page without AI and returns **data**: a list of findings a program can act on — show a person what is
+wrong, hand the findings to whatever repairs the page, or decide that a page is good enough to publish. Every finding carries a
+stable `kind` code, the fields that kind needs, and one plain English line (`text`) generated from those fields by a fixed
+template — deterministic, the same input always giving the same line, so a repair loop can hand it to a model as it is. The line
+is a convenience, never the contract: a caller that shows findings to people writes its own wording from `kind` and the fields.
 
 ## What a run looks at
 
 | Part | What it does | Needs |
 |---|---|---|
-| **Static rules** | Read the page's source files without running them: code or data that would reach another host (`<script src>`, `fetch`, dynamic `import()`, `<link>`, form actions), and similar rules that need no browser. | The files. |
+| **Static rules** | Read the page's source files without running them: the syntax of every inline script and event-handler attribute, names called but defined nowhere, elements looked up by an id the markup does not have, an id used twice, and code or data that would reach another host (`<script src>`, `fetch`, dynamic `import()`, `<link>`, form actions). | The files. |
 | **Load** | Open the page in a browser driven over the Chrome DevTools Protocol, wait until it has **settled**, and collect what went wrong while it loaded. | A page served on an origin of its own (for example a [local-origin](https://github.com/iyulab/local-origin) preview origin) and a browser: one page-assay launches (headless Edge or Chrome), or **an existing CDP endpoint the caller already owns** (an embedded WebView2, a browser the caller started). |
 | **Look** | After it settled: does something cover the page (an element over most of the viewport that the page did not ask for), is the visible text in the script the caller expects, does the visible text stand out from what is behind it, does every field have a name? | The loaded page. |
 | **Interact** | Optional steps the caller supplies — press this, type that, expect this — each judged by what the page shows afterwards. A step that does nothing observable is a finding (a page can fail silently: a button that does nothing raises no error). | Steps from the caller. Their vocabulary is a later design. |
@@ -28,25 +30,48 @@ for people is the caller's; page-assay never writes a sentence meant for a perso
 }
 ```
 
+### Severity and limits
+
+Every finding has a `severity`: `block` (the page is broken for a person — it does not run, a control does nothing, text cannot
+be read) or `notice` (worth repairing, not a reason to refuse the page). Each kind has a **default** severity, listed below; the
+caller can override it per kind, because what blocks publishing is the caller's policy, not the layer's.
+
+A run keeps at most a few findings **of the same kind** (default 3, an option) and adds one `more` entry per kind that was cut:
+`{ "kind": "more", "of": "text-contrast", "count": 14 }`. A repair loop reads three examples better than seventeen, and the
+count keeps the size of the problem visible.
+
 ### Finding
 
 Every finding has a `kind` and the fields that kind needs. Fields absent from a kind are omitted, never `null`.
 
-| `kind` | When | Fields |
-|---|---|---|
-| `uncaught` | The page's own code threw and nothing caught it. | `message`, `line`, `column`, `phase` |
-| `rejection` | A promise the page made was rejected and nothing handled it. | `message`, `line`?, `column`?, `phase` |
-| `console-error` | The page reported an error itself with `console.error`. | `message`, `phase` |
-| `resource` | A file the page asked for from its own origin did not arrive (missing, server error). | `url`, `status`? |
-| `blocked` | The content security policy refused something. | `category` (`library` · `data` · `form`), `host` |
-| `static` | A static rule matched in the source. | `rule`, `file`, `line`, `column`, `excerpt`? |
-| `covering` | An element covers the page. | `selector`, `area` (fraction of the viewport, 0–1) |
-| `language` | The visible text is mostly in another script than the caller expects. | `expected`, `observed`, `ratio` |
-| `text-contrast` | Visible text does not stand out enough from what is behind it (WCAG 2.x: 4.5:1, 3:1 for large text). Text over a picture or a gradient is skipped, not guessed. | `selector`, `text`, `foreground`, `background`, `ratio`, `needed`, `count` (elements with the same pair) |
-| `unnamed-field` | A visible input, select or text area has no name a screen reader can read (no label, `aria-label`, `aria-labelledby` or `title`; a placeholder counts for inputs). | `selector`, `nearText`? (the text beside it, for choosing a name) |
-| `interaction` | A caller's step did not have its expected effect. | `step` (the step's index), `expected`, `observed` |
+| `kind` | Default severity | When | Fields |
+|---|---|---|---|
+| `syntax` | block | An inline script or event-handler attribute does not parse. External `src` scripts and blocks whose `type` is not JavaScript are not read. | `source` (`script` with its index, or the handler attribute with its element's selector), `line`, `column`, `message` (the parser's) |
+| `undefined-call` | block | A name is called but defined nowhere the call can reach — an `onclick="save()"` with no `save`, or a handler naming a function that exists only inside a closure (`reason`: `undefined` or `not-global`). | `name`, `reason`, `line`, `column` |
+| `missing-id` | block | Code looks an element up by an id the markup does not have (`getElementById("x")`, `querySelector("#x")`). | `id`, `line`, `column` |
+| `duplicate-id` | notice | Two or more elements in the markup carry the same id. | `id`, `count`, `lines` (each element's line, in document order) |
+| `outside-reference` | block | Code or markup would reach another host, which a page meant to run without the network cannot. | `rule` (`script-src`, `fetch`, `import`, `link`, `form-action`, …), `url`, `line`, `column` |
+| `uncaught` | block | The page's own code threw and nothing caught it. | `message`, `line`, `column`, `phase` |
+| `rejection` | block | A promise the page made was rejected and nothing handled it. | `message`, `line`?, `column`?, `phase` |
+| `console-error` | notice | The page reported an error itself with `console.error`. | `message`, `phase` |
+| `error-on-screen` | block | The visible text holds a JavaScript engine's error sentence (`Cannot access 'x' before initialization`, `… is not a function`): the page caught an exception and printed its message, so no error report and no console line exists. | `selector`, `text`, `phase` |
+| `resource` | block | A file the page asked for from its own origin did not arrive (missing, server error). | `url`, `status`? |
+| `blocked` | block | The content security policy refused something. | `category` (`library` · `data` · `form`), `host` |
+| `covering` | block | An element covers the page. | `selector`, `area` (fraction of the viewport, 0–1) |
+| `language` | notice | The visible text is mostly in another script than the caller expects. | `expected`, `observed`, `ratio` |
+| `text-contrast` | notice | Visible text does not stand out enough from what is behind it (WCAG 2.x: 4.5:1, 3:1 for large text), measured on the composited colours. An empty field is measured with its `::placeholder` colour; transparent text is skipped; text over a picture or a gradient is skipped, not guessed. Findings with the same colour pair are one finding. | `selector`, `text`, `foreground`, `background`, `ratio`, `needed`, `count` (elements with the same pair) |
+| `unnamed-field` | notice | A visible input, select or text area has no name a screen reader can read (no label, `aria-label`, `aria-labelledby` or `title`; a placeholder counts for inputs). | `selector`, `nearText`? (the text beside it, for choosing a name) |
+| `interaction` | block | A caller's step did not have its expected effect. | `step` (the step's index), `expected`, `observed` |
+
+A broken script is reported **once, as its cause**: when a script does not parse, the names it would have defined are not also
+reported as `undefined-call` — one `syntax` finding, not seventeen calls to functions that "do not exist". The suppressed findings
+are counted in the cause's `hides` field.
 
 Shared fields:
+
+- **`text`** — the one-line English summary described at the top, from a fixed template per kind.
+- **`severity`** — `block` or `notice` (see «Severity and limits»).
+- **`key`** — the finding's identity across two versions of a page (see «Comparing two versions»).
 
 - **`line` / `column` are counted in the page's own file**, not in the document the browser received — whatever a server put in
   front of the page (scripts, headers) is subtracted. A finding that points at line 40 can be repaired at line 40.
@@ -64,6 +89,20 @@ Shared fields:
 A page has **settled** when it has loaded, no request it started is still pending, and nothing has changed in the document for
 a short quiet period. A fixed wait after `load` is both too short (a page that fetches its data) and too long (a page that is
 done at once); settling is what makes `phase` and `settledMs` mean something.
+
+## Comparing two versions
+
+A repair loop needs to know what **this change** broke, not every finding the page has ever had: a model that is handed old
+findings with new ones "repairs" what it was not asked to touch. So comparison is first-class: a run can take a page's previous
+version as well, and every finding is then marked `new` (only in the new version), `kept` (in both) or `gone` (fixed by the change,
+listed once with `status: "gone"`).
+
+Two findings are the same finding when their `key` is equal. The key is built from what survives an edit elsewhere in the file —
+never the line number: the kind, plus the name, id, selector, URL or colour pair the kind is about, plus, for code, the enclosing
+script or handler and the text of the offending expression. A line moved by an insertion above it keeps its key.
+
+Comparison covers **both** halves: the static rules compare the two sources directly; the driven run loads each version in the
+same context. A caller that only needs the static half (cheap, no browser) can ask for that alone.
 
 ## The context a run states
 
@@ -120,3 +159,8 @@ and adds what only a driver sees (settling, covering, language, text contrast, u
 5. **Interaction steps** — their vocabulary is the next design, after the report settles.
 6. **A context it cannot match.** When the caller asks for a context the driver cannot give (a different engine, a real GPU), does the run fail, or run and state the difference in `context`? Proposal: run, and state it — the caller decides whether the difference matters.
 7. **Where the policy comes from.** The caller passes the policy it serves with (as headers, or a reference the origin library can resolve). Whether page-assay reads it from the origin it drives or takes it as a parameter depends on the first open question above.
+8. **The keys of driven findings.** A `text-contrast` or `unnamed-field` finding keys on its selector; a generated page often has no
+   stable ids, so a positional selector can shift when an element is inserted before it. Proposal: key on the nearest id or label
+   plus the element's text, and fall back to the positional selector only when neither exists.
+9. **The template wording of `text`** is part of what a caller may rely on (a model is prompted with it). Proposal: changing a
+   template is a minor version, listed in the changelog.
