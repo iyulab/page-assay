@@ -13,6 +13,19 @@ public enum Severity
     Block,
 }
 
+/// <summary>Where a finding stands when two versions of a page are compared.</summary>
+public enum Comparison
+{
+    /// <summary>Only in the new version: this change caused it.</summary>
+    New,
+
+    /// <summary>In both versions.</summary>
+    Kept,
+
+    /// <summary>Only in the previous version: the change fixed it.</summary>
+    Gone,
+}
+
 /// <summary>When a finding happened: before the page settled, or after.</summary>
 public enum Phase
 {
@@ -29,6 +42,13 @@ public enum Phase
 /// </summary>
 public sealed record Finding(string Kind, Severity Severity, string Text, Phase? Phase, IReadOnlyDictionary<string, JsonNode?> Fields)
 {
+    /// <summary>The finding's identity across two versions of a page: built from what survives an edit elsewhere in the file
+    /// (the kind and the name, URL, selector or colours it is about), never from a line number.</summary>
+    public string Key { get; } = FindingKinds.KeyOf(Kind, Fields);
+
+    /// <summary>Set when two versions were compared; null otherwise.</summary>
+    public Comparison? Status { get; init; }
+
     /// <summary>The finding in the report's JSON shape: <c>kind</c>, <c>severity</c>, <c>text</c>, <c>phase</c> and the kind's fields, flat.</summary>
     public JsonObject ToJson()
     {
@@ -38,6 +58,9 @@ public sealed record Finding(string Kind, Severity Severity, string Text, Phase?
             ["severity"] = Severity == Severity.Block ? "block" : "notice",
             ["text"] = Text,
         };
+        json["key"] = Key;
+        if (Status is { } status)
+            json["status"] = status switch { Comparison.New => "new", Comparison.Kept => "kept", _ => "gone" };
         if (Phase is { } phase)
             json["phase"] = phase == PageAssay.Phase.Load ? "load" : "use";
         foreach (var (name, value) in Fields)
@@ -105,6 +128,25 @@ public static class FindingKinds
         ConsoleError or TextContrast or UnnamedField or More => Severity.Notice,
         _ => Severity.Block,
     };
+
+    internal static string KeyOf(string kind, IReadOnlyDictionary<string, JsonNode?> f)
+    {
+        string S(string name) => f.TryGetValue(name, out var v) && v is not null ? v.ToString() : "";
+        var subject = kind switch
+        {
+            Uncaught or Rejection => $"{S("file")}|{S("message")}",
+            ConsoleError => S("message"),
+            ErrorOnScreen => $"{S("selector")}|{S("text")}",
+            Resource => S("url"),
+            Blocked => $"{S("category")}|{S("host")}",
+            TextContrast => $"{S("foreground")}|{S("background")}|{S("needed")}",
+            UnnamedField => f.ContainsKey("nearText") ? "near:" + S("nearText") : S("selector"),
+            More => S("of"),
+            _ => string.Join("|", f.Where(p => p.Key is not ("line" or "column" or "count")).OrderBy(p => p.Key, StringComparer.Ordinal)
+                .Select(p => $"{p.Key}={p.Value}")),
+        };
+        return kind + ":" + subject;
+    }
 
     internal static string TextOf(string kind, IReadOnlyDictionary<string, JsonNode?> f)
     {

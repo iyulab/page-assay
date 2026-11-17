@@ -72,6 +72,7 @@ Shared fields:
 - **`text`** — the one-line English summary described at the top, from a fixed template per kind.
 - **`severity`** — `block` or `notice` (see «Severity and limits»).
 - **`key`** — the finding's identity across two versions of a page (see «Comparing two versions»).
+- **`status`** — `new`, `kept` or `gone`, only when two versions were compared. The per-kind limit applies per kind *and* status, so the findings a change caused are never crowded out by old ones.
 
 - **`line` / `column` are counted in the page's own file**, not in the document the browser received — whatever a server put in
   front of the page (scripts, headers) is subtracted. A finding that points at line 40 can be repaired at line 40.

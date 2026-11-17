@@ -54,6 +54,63 @@ public static class Assayer
         ArgumentNullException.ThrowIfNull(browser);
         ArgumentNullException.ThrowIfNull(page);
         options ??= new AssayOptions();
+        return Limit(await RunAllAsync(browser, page, options, cancellationToken).ConfigureAwait(false), options);
+    }
+
+    /// <summary>
+    /// Runs the previous and the new version of a page in the same context and reports the new version's findings, each marked
+    /// <see cref="Comparison.New"/> (only in the new version) or <see cref="Comparison.Kept"/> (in both), plus the previous version's
+    /// findings the change fixed, marked <see cref="Comparison.Gone"/>. Findings are matched by <see cref="Finding.Key"/>, never by line.
+    /// </summary>
+    public static async Task<AssayReport> CompareAsync(Browser browser, Uri before, Uri after, AssayOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(browser);
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        options ??= new AssayOptions();
+        var previous = await RunAllAsync(browser, before, options, cancellationToken).ConfigureAwait(false);
+        var current = await RunAllAsync(browser, after, options, cancellationToken).ConfigureAwait(false);
+
+        var unmatched = previous.Findings.GroupBy(f => f.Key, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => new Queue<Finding>(g), StringComparer.Ordinal);
+        var marked = new List<Finding>();
+        foreach (var finding in current.Findings)
+        {
+            var kept = unmatched.TryGetValue(finding.Key, out var same) && same.TryDequeue(out _);
+            marked.Add(finding with { Status = kept ? Comparison.Kept : Comparison.New });
+        }
+        marked.AddRange(unmatched.Values.SelectMany(q => q).Select(f => f with { Status = Comparison.Gone }));
+        return Limit(current with { Findings = marked }, options);
+    }
+
+    // Keeps at most PerKindLimit findings per kind (and per comparison status), counting the rest in one «more» finding each.
+    private static AssayReport Limit(AssayReport all, AssayOptions options)
+    {
+        var kept = new List<Finding>();
+        var counts = new Dictionary<(string, Comparison?), int>();
+        var cut = new Dictionary<(string Kind, Comparison? Status), int>();
+        foreach (var finding in all.Findings)
+        {
+            var group = (finding.Kind, finding.Status);
+            var seen = counts.GetValueOrDefault(group);
+            if (seen < options.PerKindLimit) kept.Add(finding);
+            else cut[group] = cut.GetValueOrDefault(group) + 1;
+            counts[group] = seen + 1;
+        }
+        foreach (var ((kind, status), count) in cut)
+        {
+            var fields = new Dictionary<string, JsonNode?>(StringComparer.Ordinal) { ["of"] = kind, ["count"] = count };
+            kept.Add(new Finding(FindingKinds.More, Severity.Notice, FindingKinds.TextOf(FindingKinds.More, fields), null, fields)
+                { Status = status });
+        }
+        var truncated = kept.Count > options.TotalLimit;
+        if (truncated) kept = kept.Take(options.TotalLimit).ToList();
+        return all with { Findings = kept, Truncated = truncated };
+    }
+
+    private static async Task<AssayReport> RunAllAsync(Browser browser, Uri page, AssayOptions options, CancellationToken cancellationToken)
+    {
 
         await using var cdp = await CdpConnection.ConnectAsync(browser.WebSocketUrl, cancellationToken).ConfigureAwait(false);
         var version = await cdp.SendAsync("Browser.getVersion", cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -295,7 +352,8 @@ public static class Assayer
                 ? FindingKinds.Rejection
                 : FindingKinds.Uncaught;
             var fields = new List<(string, JsonNode?)> { ("message", message) };
-            if (details.TryGetProperty("url", out var url) && Uri.TryCreate(url.GetString(), UriKind.Absolute, out var file) && SameOrigin(file))
+            if (details.TryGetProperty("url", out var url) && Uri.TryCreate(url.GetString(), UriKind.Absolute, out var file) && SameOrigin(file)
+                && file.AbsolutePath != page.AbsolutePath) // the page's own file goes unnamed, so a renamed version still matches
                 fields.Add(("file", PathOf(file)));
             fields.Add(("line", details.GetProperty("lineNumber").GetInt32() + 1));
             fields.Add(("column", details.GetProperty("columnNumber").GetInt32() + 1));
@@ -347,23 +405,7 @@ public static class Assayer
         {
             List<Finding> all;
             lock (_gate) all = _found.OrderBy(f => f.At).Select(f => f.Finding).ToList();
-            var kept = new List<Finding>();
-            var cut = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var finding in all)
-            {
-                if (kept.Count(k => k.Kind == finding.Kind) < options.PerKindLimit)
-                    kept.Add(finding);
-                else
-                    cut[finding.Kind] = cut.GetValueOrDefault(finding.Kind) + 1;
-            }
-            foreach (var (kind, count) in cut)
-            {
-                var fields = Fields(("of", kind), ("count", count));
-                kept.Add(new Finding(FindingKinds.More, Severity.Notice, FindingKinds.TextOf(FindingKinds.More, fields), null, fields));
-            }
-            var truncated = kept.Count > options.TotalLimit;
-            if (truncated) kept = kept.Take(options.TotalLimit).ToList();
-            return new AssayReport(PathOf(page), loaded, settledMs, kept, truncated, context);
+            return new AssayReport(PathOf(page), loaded, settledMs, all, Truncated: false, context);
         }
 
         private async Task<bool> WaitAsync(Func<bool> condition, TimeSpan timeout, CancellationToken cancellationToken)
