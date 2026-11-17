@@ -69,8 +69,15 @@ public sealed record Finding(string Kind, Severity Severity, string Text, Phase?
     }
 }
 
+/// <summary>A viewport size in CSS pixels.</summary>
+public sealed record Viewport(int Width, int Height)
+{
+    /// <summary><c>1280x800</c>.</summary>
+    public override string ToString() => string.Create(CultureInfo.InvariantCulture, $"{Width}x{Height}");
+}
+
 /// <summary>The browser context a run ran in.</summary>
-public sealed record RunContext(string Engine, bool Headless, string Origin, int ViewportWidth, int ViewportHeight)
+public sealed record RunContext(string Engine, bool Headless, string Origin, IReadOnlyList<Viewport> Viewports, IReadOnlyList<string> ColorSchemes)
 {
     /// <summary>The context in the report's JSON shape.</summary>
     public JsonObject ToJson() => new()
@@ -78,7 +85,8 @@ public sealed record RunContext(string Engine, bool Headless, string Origin, int
         ["engine"] = Engine,
         ["headless"] = Headless,
         ["origin"] = Origin,
-        ["viewports"] = new JsonArray(new JsonObject { ["width"] = ViewportWidth, ["height"] = ViewportHeight, ["scale"] = 1 }),
+        ["viewports"] = new JsonArray(Viewports.Select(v => (JsonNode)new JsonObject { ["width"] = v.Width, ["height"] = v.Height, ["scale"] = 1 }).ToArray()),
+        ["colorSchemes"] = new JsonArray(ColorSchemes.Select(s => (JsonNode)s).ToArray()),
     };
 }
 
@@ -113,6 +121,8 @@ public static class FindingKinds
     public const string ErrorOnScreen = "error-on-screen";
     /// <summary>Visible text does not stand out enough from what is behind it (WCAG 2.x).</summary>
     public const string TextContrast = "text-contrast";
+    /// <summary>The page is wider than the viewport: a person has to scroll sideways.</summary>
+    public const string Overflow = "overflow";
     /// <summary>A visible field has no name a screen reader can read.</summary>
     public const string UnnamedField = "unnamed-field";
     /// <summary>A file the page asked for from its own origin did not arrive.</summary>
@@ -125,7 +135,7 @@ public static class FindingKinds
     /// <summary>The default severity of a kind; a caller overrides it per kind in <see cref="AssayOptions.Severities"/>.</summary>
     public static Severity DefaultSeverity(string kind) => kind switch
     {
-        ConsoleError or TextContrast or UnnamedField or More => Severity.Notice,
+        ConsoleError or TextContrast or UnnamedField or Overflow or More => Severity.Notice,
         _ => Severity.Block,
     };
 
@@ -140,6 +150,7 @@ public static class FindingKinds
             Resource => S("url"),
             Blocked => $"{S("category")}|{S("host")}",
             TextContrast => $"{S("foreground")}|{S("background")}|{S("needed")}",
+            Overflow => S("viewport"),
             UnnamedField => f.ContainsKey("nearText") ? "near:" + S("nearText") : S("selector"),
             More => S("of"),
             _ => string.Join("|", f.Where(p => p.Key is not ("line" or "column" or "count")).OrderBy(p => p.Key, StringComparer.Ordinal)
@@ -164,7 +175,8 @@ public static class FindingKinds
                 ? $"The file {S("url")} did not arrive (status {S("status")})."
                 : $"The file {S("url")} did not arrive.",
             Blocked => $"A request to {S("host")} was refused: the page must work without other hosts.",
-            TextContrast => $"Text in {S("selector")} is hard to read: {S("foreground")} on {S("background")} has contrast {S("ratio")}:1, needs {S("needed")}:1 ({S("count")} element(s), e.g. \"{S("text")}\").",
+            TextContrast => $"Text in {S("selector")} is hard to read ({S("scheme")}, {S("viewport")}): {S("foreground")} on {S("background")} has contrast {S("ratio")}:1, needs {S("needed")}:1 ({S("count")} element(s), e.g. \"{S("text")}\").",
+            Overflow => $"At {S("viewport")} ({S("scheme")}) the page is {S("by")} px wider than the window: a person has to scroll sideways.",
             UnnamedField => f.ContainsKey("nearText")
                 ? $"The field {S("selector")} has no name a screen reader can read (the text beside it: \"{S("nearText")}\")."
                 : $"The field {S("selector")} has no name a screen reader can read.",

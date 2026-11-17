@@ -63,10 +63,20 @@ internal static class LookProbe
               if (c[3] > 0) layers.push(c);
               if (c[3] >= 1) break;
             }
-            let base = [255, 255, 255, 1];
+            let base = canvasColour;
             for (let i = layers.length - 1; i >= 0; i--) base = over(layers[i], base);
             return base;
           };
+          // The colour of the page's canvas under everything: the system Canvas colour as the root's colour scheme resolves it
+          // (dark only when the page opted into a dark scheme), read from a probe element — a page's own background covers it.
+          const canvasColour = (() => {
+            const probe = document.createElement('div');
+            probe.style.cssText = 'position:absolute;width:0;height:0;background-color:Canvas';
+            document.documentElement.appendChild(probe);
+            const c = rgba(getComputedStyle(probe).backgroundColor);
+            probe.remove();
+            return c[3] >= 1 ? c : [255, 255, 255, 1];
+          })();
           const large = (s) => {
             const px = parseFloat(s.fontSize);
             return px >= 24 || (px >= 18.66 && parseInt(s.fontWeight, 10) >= 700);
@@ -135,7 +145,8 @@ internal static class LookProbe
             unnamed.push(near ? { selector: selectorOf(el), nearText: near.slice(0, 60) } : { selector: selectorOf(el) });
           }
 
-          return { errorText, contrast: [...contrast.values()], unnamed };
+          const overflow = Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth);
+          return { errorText, contrast: [...contrast.values()], unnamed, overflow };
         })()
         """;
 }

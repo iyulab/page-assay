@@ -92,4 +92,31 @@ public sealed class LookTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         Assert.Equal("#amount", finding.Fields["selector"]!.ToString());
         Assert.Equal("Amount", finding.Fields["nearText"]!.ToString());
     }
+
+    [Fact]
+    public async Task Text_unreadable_only_in_the_dark_scheme_is_found_with_the_scheme_it_was_seen_in()
+    {
+        var report = await Run("""
+            <!doctype html><meta name="color-scheme" content="light dark">
+            <style>
+              body { background: #fff; color: #222 }
+              @media (prefers-color-scheme: dark) { body { background: #111; color: #333 } }
+            </style>
+            <p>Night text</p>
+            """);
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal(FindingKinds.TextContrast, finding.Kind);
+        Assert.Equal("dark", finding.Fields["scheme"]!.ToString());
+        Assert.Equal("#111111", finding.Fields["background"]!.ToString());
+    }
+
+    [Fact]
+    public async Task A_layout_wider_than_a_phone_is_an_overflow_at_that_width_only()
+    {
+        var report = await Run("""<!doctype html><meta name="viewport" content="width=device-width"><div style="width:900px">wide</div>""");
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal(FindingKinds.Overflow, finding.Kind);
+        Assert.Equal("390x844", finding.Fields["viewport"]!.ToString());
+        Assert.True((int)finding.Fields["by"]! > 400);
+    }
 }

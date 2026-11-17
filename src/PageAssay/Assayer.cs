@@ -8,11 +8,13 @@ namespace PageAssay;
 /// <summary>What a run does and how far it waits.</summary>
 public sealed record AssayOptions
 {
-    /// <summary>The viewport width in CSS pixels.</summary>
-    public int ViewportWidth { get; init; } = 1280;
+    /// <summary>The viewports the page is looked at in. The page loads in the first; the look checks run in each.
+    /// The default is a desktop window and a phone-width one — a layout broken only at a narrower width is common.</summary>
+    public IReadOnlyList<Viewport> Viewports { get; init; } = [new(1280, 800), new(390, 844)];
 
-    /// <summary>The viewport height in CSS pixels.</summary>
-    public int ViewportHeight { get; init; } = 800;
+    /// <summary>The colour schemes (<c>light</c>, <c>dark</c>) the page is looked at in, by emulating <c>prefers-color-scheme</c>.
+    /// The page loads in the first.</summary>
+    public IReadOnlyList<string> ColorSchemes { get; init; } = ["light", "dark"];
 
     /// <summary>How long the page may take to fire its load event.</summary>
     public TimeSpan LoadTimeout { get; init; } = TimeSpan.FromSeconds(15);
@@ -54,6 +56,7 @@ public static class Assayer
         ArgumentNullException.ThrowIfNull(browser);
         ArgumentNullException.ThrowIfNull(page);
         options ??= new AssayOptions();
+        Validate(options);
         return Limit(await RunAllAsync(browser, page, options, cancellationToken).ConfigureAwait(false), options);
     }
 
@@ -69,6 +72,7 @@ public static class Assayer
         ArgumentNullException.ThrowIfNull(before);
         ArgumentNullException.ThrowIfNull(after);
         options ??= new AssayOptions();
+        Validate(options);
         var previous = await RunAllAsync(browser, before, options, cancellationToken).ConfigureAwait(false);
         var current = await RunAllAsync(browser, after, options, cancellationToken).ConfigureAwait(false);
 
@@ -82,6 +86,12 @@ public static class Assayer
         }
         marked.AddRange(unmatched.Values.SelectMany(q => q).Select(f => f with { Status = Comparison.Gone }));
         return Limit(current with { Findings = marked }, options);
+    }
+
+    private static void Validate(AssayOptions options)
+    {
+        if (options.Viewports.Count == 0 || options.ColorSchemes.Count == 0)
+            throw new ArgumentException("A run needs at least one viewport and one colour scheme.", nameof(options));
     }
 
     // Keeps at most PerKindLimit findings per kind (and per comparison status), counting the rest in one «more» finding each.
@@ -164,10 +174,7 @@ public static class Assayer
                 await Send(domain, null, cancellationToken).ConfigureAwait(false);
             await Send("Fetch.enable", new JsonObject { ["patterns"] = new JsonArray(new JsonObject { ["urlPattern"] = "*" }) },
                 cancellationToken).ConfigureAwait(false);
-            await Send("Emulation.setDeviceMetricsOverride", new JsonObject
-            {
-                ["width"] = options.ViewportWidth, ["height"] = options.ViewportHeight, ["deviceScaleFactor"] = 1, ["mobile"] = false,
-            }, cancellationToken).ConfigureAwait(false);
+            await EmulateAsync(options.Viewports[0], options.ColorSchemes[0], cancellationToken).ConfigureAwait(false);
             await Send("Page.addScriptToEvaluateOnNewDocument", new JsonObject { ["source"] = QuietTracker, ["worldName"] = World },
                 cancellationToken).ConfigureAwait(false);
 
@@ -175,7 +182,7 @@ public static class Assayer
             var navigation = await Send("Page.navigate", new JsonObject { ["url"] = page.AbsoluteUri }, cancellationToken)
                 .ConfigureAwait(false);
             var context = new RunContext(engine, headless, page.Scheme == Uri.UriSchemeFile ? "file" : "http",
-                options.ViewportWidth, options.ViewportHeight);
+                options.Viewports, options.ColorSchemes);
             if (navigation.TryGetProperty("errorText", out var navigationError))
             {
                 Add(FindingKinds.Resource, Fields(("url", PathOf(page)), ("error", navigationError.GetString())));
@@ -198,7 +205,18 @@ public static class Assayer
                     await Task.Delay(50, cancellationToken).ConfigureAwait(false);
                 }
                 await Task.Delay(options.UseWindow, cancellationToken).ConfigureAwait(false);
-                await LookAsync(cancellationToken).ConfigureAwait(false);
+                var first = true;
+                foreach (var scheme in options.ColorSchemes)
+                foreach (var viewport in options.Viewports)
+                {
+                    if (!first)
+                    {
+                        await EmulateAsync(viewport, scheme, cancellationToken).ConfigureAwait(false);
+                        await WaitQuietAsync(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+                    }
+                    await LookAsync(first, scheme, viewport, cancellationToken).ConfigureAwait(false);
+                    first = false;
+                }
             }
             cdp.EventReceived = null;
             return Build(loaded, settledMs, context);
@@ -219,20 +237,46 @@ public static class Assayer
             return sinceChange is { ValueKind: JsonValueKind.Number } ms && ms.GetDouble() >= quiet;
         }
 
-        private async Task LookAsync(CancellationToken cancellationToken)
+        private async Task EmulateAsync(Viewport viewport, string scheme, CancellationToken cancellationToken)
+        {
+            await Send("Emulation.setDeviceMetricsOverride", new JsonObject
+            {
+                ["width"] = viewport.Width, ["height"] = viewport.Height, ["deviceScaleFactor"] = 1, ["mobile"] = false,
+            }, cancellationToken).ConfigureAwait(false);
+            await Send("Emulation.setEmulatedMedia", new JsonObject
+            {
+                ["features"] = new JsonArray(new JsonObject { ["name"] = "prefers-color-scheme", ["value"] = scheme }),
+            }, cancellationToken).ConfigureAwait(false);
+        }
+
+        // After a change of viewport or scheme: the page may re-render (a media query, a resize handler) before it is looked at.
+        private async Task WaitQuietAsync(TimeSpan limit, CancellationToken cancellationToken)
+        {
+            var deadline = _clock.ElapsedMilliseconds + (long)limit.TotalMilliseconds;
+            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            while (_clock.ElapsedMilliseconds < deadline && !await IsQuietAsync(cancellationToken).ConfigureAwait(false))
+                await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task LookAsync(bool first, string scheme, Viewport viewport, CancellationToken cancellationToken)
         {
             if (await EvaluateAsync(LookProbe.Script, cancellationToken).ConfigureAwait(false) is not { ValueKind: JsonValueKind.Object } look)
                 return;
+            var seenIn = new (string, JsonNode?)[] { ("scheme", scheme), ("viewport", viewport.ToString()) };
+            if (look.GetProperty("overflow").GetInt32() is var overflow and > 0)
+                AddOnce(FindingKinds.Overflow, Fields([("by", overflow), .. seenIn]));
+            foreach (var item in look.GetProperty("contrast").EnumerateArray())
+                AddOnce(FindingKinds.TextContrast, Fields([
+                    ("selector", item.GetProperty("selector").GetString()), ("text", item.GetProperty("text").GetString()),
+                    ("foreground", item.GetProperty("foreground").GetString()), ("background", item.GetProperty("background").GetString()),
+                    ("ratio", item.GetProperty("ratio").GetDouble()), ("needed", item.GetProperty("needed").GetDouble()),
+                    ("count", item.GetProperty("count").GetInt32()), .. seenIn]));
+            // What follows does not depend on the scheme or the width: looked at once.
+            if (!first) return;
             // The page caught an exception and printed its message: no error event and no console line exist, only the text.
             foreach (var item in look.GetProperty("errorText").EnumerateArray())
                 Add(FindingKinds.ErrorOnScreen, Fields(("selector", item.GetProperty("selector").GetString()),
                     ("text", item.GetProperty("text").GetString())), PageAssay.Phase.Use);
-            foreach (var item in look.GetProperty("contrast").EnumerateArray())
-                Add(FindingKinds.TextContrast, Fields(
-                    ("selector", item.GetProperty("selector").GetString()), ("text", item.GetProperty("text").GetString()),
-                    ("foreground", item.GetProperty("foreground").GetString()), ("background", item.GetProperty("background").GetString()),
-                    ("ratio", item.GetProperty("ratio").GetDouble()), ("needed", item.GetProperty("needed").GetDouble()),
-                    ("count", item.GetProperty("count").GetInt32())));
             foreach (var item in look.GetProperty("unnamed").EnumerateArray())
                 Add(FindingKinds.UnnamedField, Fields(("selector", item.GetProperty("selector").GetString()),
                     ("nearText", item.TryGetProperty("nearText", out var near) ? near.GetString() : null)));
@@ -387,6 +431,15 @@ public static class Assayer
 
         private static Dictionary<string, JsonNode?> Fields(params (string Name, JsonNode? Value)[] fields) =>
             fields.Where(f => f.Value is not null).ToDictionary(f => f.Name, f => f.Value);
+
+        // A look finding seen again in another viewport or scheme is the same finding (its key): reported where first seen.
+        private void AddOnce(string kind, Dictionary<string, JsonNode?> fields)
+        {
+            var key = FindingKinds.KeyOf(kind, fields);
+            lock (_gate)
+                if (_found.Any(f => f.Finding.Key == key)) return;
+            Add(kind, fields);
+        }
 
         private void Add(string kind, Dictionary<string, JsonNode?> fields, Phase? phase = null)
         {
