@@ -51,12 +51,12 @@ Every finding has a `kind` and the fields that kind needs. Fields absent from a 
 | `missing-id` | block | Code looks an element up by an id the markup does not have (`getElementById("x")`, `querySelector("#x")`). | `id`, `line`, `column` |
 | `duplicate-id` | notice | Two or more elements in the markup carry the same id. | `id`, `count`, `lines` (each element's line, in document order) |
 | `outside-reference` | block | Code or markup would reach another host, which a page meant to run without the network cannot. | `rule` (`script-src`, `fetch`, `import`, `link`, `form-action`, …), `url`, `line`, `column` |
-| `uncaught` | block | The page's own code threw and nothing caught it. | `message`, `line`, `column`, `phase` |
+| `uncaught` | block | The page's own code threw and nothing caught it. | `message`, `file`? (when not the page itself), `line`, `column`, `phase` |
 | `rejection` | block | A promise the page made was rejected and nothing handled it. | `message`, `line`?, `column`?, `phase` |
 | `console-error` | notice | The page reported an error itself with `console.error`. | `message`, `phase` |
 | `error-on-screen` | block | The visible text holds a JavaScript engine's error sentence (`Cannot access 'x' before initialization`, `… is not a function`): the page caught an exception and printed its message, so no error report and no console line exists. | `selector`, `text`, `phase` |
-| `resource` | block | A file the page asked for from its own origin did not arrive (missing, server error). | `url`, `status`? |
-| `blocked` | block | The content security policy refused something. | `category` (`library` · `data` · `form`), `host` |
+| `resource` | block | A file the page asked for from its own origin did not arrive (missing, server error, a dropped connection). Requests the browser makes on its own (a favicon) are not the page's and are not reported. | `url`, `status`? or `error`? |
+| `blocked` | block | Something was refused: by the content security policy (`library` · `data` · `form`), or by the run itself because it went to another host (`network`). | `category`, `host`, `url`? |
 | `covering` | block | An element covers the page. | `selector`, `area` (fraction of the viewport, 0–1) |
 | `language` | notice | The visible text is mostly in another script than the caller expects. | `expected`, `observed`, `ratio` |
 | `text-contrast` | notice | Visible text does not stand out enough from what is behind it (WCAG 2.x: 4.5:1, 3:1 for large text), measured on the composited colours. An empty field is measured with its `::placeholder` colour; transparent text is skipped; text over a picture or a gradient is skipped, not guessed. Findings with the same colour pair are one finding. | `selector`, `text`, `foreground`, `background`, `ratio`, `needed`, `count` (elements with the same pair) |

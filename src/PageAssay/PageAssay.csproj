@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Checks a web page without AI: drives it over the Chrome DevTools Protocol, collects what went wrong while it loaded and in use, and returns a typed report. No dependencies.</Description>
+    <PackageTags>web;page;check;cdp;devtools;accessibility;contrast</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <InternalsVisibleTo Include="PageAssay.Tests" />
+  </ItemGroup>
+
+</Project>
