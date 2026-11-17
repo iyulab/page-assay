@@ -88,6 +88,10 @@ public static class FindingKinds
     public const string ConsoleError = "console-error";
     /// <summary>The visible text holds an engine's error sentence the page printed itself.</summary>
     public const string ErrorOnScreen = "error-on-screen";
+    /// <summary>Visible text does not stand out enough from what is behind it (WCAG 2.x).</summary>
+    public const string TextContrast = "text-contrast";
+    /// <summary>A visible field has no name a screen reader can read.</summary>
+    public const string UnnamedField = "unnamed-field";
     /// <summary>A file the page asked for from its own origin did not arrive.</summary>
     public const string Resource = "resource";
     /// <summary>A request was refused: another host, which the run does not reach.</summary>
@@ -98,7 +102,7 @@ public static class FindingKinds
     /// <summary>The default severity of a kind; a caller overrides it per kind in <see cref="AssayOptions.Severities"/>.</summary>
     public static Severity DefaultSeverity(string kind) => kind switch
     {
-        ConsoleError or More => Severity.Notice,
+        ConsoleError or TextContrast or UnnamedField or More => Severity.Notice,
         _ => Severity.Block,
     };
 
@@ -118,6 +122,10 @@ public static class FindingKinds
                 ? $"The file {S("url")} did not arrive (status {S("status")})."
                 : $"The file {S("url")} did not arrive.",
             Blocked => $"A request to {S("host")} was refused: the page must work without other hosts.",
+            TextContrast => $"Text in {S("selector")} is hard to read: {S("foreground")} on {S("background")} has contrast {S("ratio")}:1, needs {S("needed")}:1 ({S("count")} element(s), e.g. \"{S("text")}\").",
+            UnnamedField => f.ContainsKey("nearText")
+                ? $"The field {S("selector")} has no name a screen reader can read (the text beside it: \"{S("nearText")}\")."
+                : $"The field {S("selector")} has no name a screen reader can read.",
             More => $"{S("count")} more {S("of")} findings were left out.",
             _ => kind,
         };

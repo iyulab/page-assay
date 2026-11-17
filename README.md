@@ -7,7 +7,7 @@ The report it returns: [docs/report.md](docs/report.md) (draft).
 
 Work in progress. The driven half runs: launch a headless Chrome, Edge or Chromium (or attach to an endpoint the caller owns), load a
 page in a fresh browser context, wait until it settles, and report uncaught errors, unhandled rejections, console errors, files that did
-not arrive, requests to other hosts (refused) and engine error text the page printed itself. Static rules and the look checks are next.
+not arrive, requests to other hosts (refused), engine error text the page printed itself, text that does not stand out from what is behind it (WCAG contrast, composited colours, placeholders included) and fields with no name. Static rules, comparing two versions and the covering check are next.
 
 ```csharp
 await using var browser = await Browser.LaunchAsync();

@@ -141,7 +141,7 @@ public static class Assayer
                     await Task.Delay(50, cancellationToken).ConfigureAwait(false);
                 }
                 await Task.Delay(options.UseWindow, cancellationToken).ConfigureAwait(false);
-                await LookForErrorTextAsync(cancellationToken).ConfigureAwait(false);
+                await LookAsync(cancellationToken).ConfigureAwait(false);
             }
             cdp.EventReceived = null;
             return Build(loaded, settledMs, context);
@@ -162,46 +162,23 @@ public static class Assayer
             return sinceChange is { ValueKind: JsonValueKind.Number } ms && ms.GetDouble() >= quiet;
         }
 
-        // The page caught an exception and printed its message: no error event and no console line exist, only the text.
-        private const string ErrorTextProbe = """
-            (() => {
-              const patterns = [
-                /\b(?:ReferenceError|TypeError|SyntaxError|RangeError)\b/,
-                /Cannot access '[^']+' before initialization/,
-                /\bis not defined\b/, /\bis not a function\b/, /\bis not iterable\b/,
-                /Cannot (?:read|set) properties of (?:undefined|null)/,
-                /Unexpected token/,
-              ];
-              const selectorOf = (el) => {
-                const parts = [];
-                for (let e = el; e && e.nodeType === 1 && parts.length < 4; e = e.parentElement) {
-                  if (e.id) { parts.unshift('#' + CSS.escape(e.id)); break; }
-                  const tag = e.localName;
-                  const same = e.parentElement ? [...e.parentElement.children].filter(c => c.localName === tag) : [];
-                  parts.unshift(same.length > 1 ? `${tag}:nth-of-type(${same.indexOf(e) + 1})` : tag);
-                }
-                return parts.join(' > ');
-              };
-              const out = [];
-              const walker = document.createTreeWalker(document.body || document, NodeFilter.SHOW_TEXT);
-              for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-                const text = n.textContent.trim();
-                const el = n.parentElement;
-                if (!text || !el || ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(el.tagName)) continue;
-                if (el.getClientRects().length === 0) continue;
-                if (patterns.some(p => p.test(text))) out.push({ selector: selectorOf(el), text: text.slice(0, 200) });
-              }
-              return out;
-            })()
-            """;
-
-        private async Task LookForErrorTextAsync(CancellationToken cancellationToken)
+        private async Task LookAsync(CancellationToken cancellationToken)
         {
-            var found = await EvaluateAsync(ErrorTextProbe, cancellationToken).ConfigureAwait(false);
-            if (found is not { ValueKind: JsonValueKind.Array } list) return;
-            foreach (var item in list.EnumerateArray())
+            if (await EvaluateAsync(LookProbe.Script, cancellationToken).ConfigureAwait(false) is not { ValueKind: JsonValueKind.Object } look)
+                return;
+            // The page caught an exception and printed its message: no error event and no console line exist, only the text.
+            foreach (var item in look.GetProperty("errorText").EnumerateArray())
                 Add(FindingKinds.ErrorOnScreen, Fields(("selector", item.GetProperty("selector").GetString()),
                     ("text", item.GetProperty("text").GetString())), PageAssay.Phase.Use);
+            foreach (var item in look.GetProperty("contrast").EnumerateArray())
+                Add(FindingKinds.TextContrast, Fields(
+                    ("selector", item.GetProperty("selector").GetString()), ("text", item.GetProperty("text").GetString()),
+                    ("foreground", item.GetProperty("foreground").GetString()), ("background", item.GetProperty("background").GetString()),
+                    ("ratio", item.GetProperty("ratio").GetDouble()), ("needed", item.GetProperty("needed").GetDouble()),
+                    ("count", item.GetProperty("count").GetInt32())));
+            foreach (var item in look.GetProperty("unnamed").EnumerateArray())
+                Add(FindingKinds.UnnamedField, Fields(("selector", item.GetProperty("selector").GetString()),
+                    ("nearText", item.TryGetProperty("nearText", out var near) ? near.GetString() : null)));
         }
 
         private async Task<JsonElement?> EvaluateAsync(string expression, CancellationToken cancellationToken)
