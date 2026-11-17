@@ -28,6 +28,10 @@ public sealed record AssayOptions
     /// <summary>How long the run keeps watching after the page settled, for errors that happen in use.</summary>
     public TimeSpan UseWindow { get; init; } = TimeSpan.FromMilliseconds(300);
 
+    /// <summary>How many lines the serving origin puts in front of the page's own first line (markup or scripts it injects).
+    /// Lines in the page's own file are reported minus this, so a finding at line 40 can be repaired at line 40 of the file.</summary>
+    public int PageLineOffset { get; init; }
+
     /// <summary>At most this many findings of one kind; the rest are counted in one <c>more</c> finding.</summary>
     public int PerKindLimit { get; init; } = 3;
 
@@ -396,10 +400,21 @@ public static class Assayer
                 ? FindingKinds.Rejection
                 : FindingKinds.Uncaught;
             var fields = new List<(string, JsonNode?)> { ("message", message) };
+            var inPage = true;
             if (details.TryGetProperty("url", out var url) && Uri.TryCreate(url.GetString(), UriKind.Absolute, out var file) && SameOrigin(file)
                 && file.AbsolutePath != page.AbsolutePath) // the page's own file goes unnamed, so a renamed version still matches
+            {
                 fields.Add(("file", PathOf(file)));
-            fields.Add(("line", details.GetProperty("lineNumber").GetInt32() + 1));
+                inPage = false;
+            }
+            var line = details.GetProperty("lineNumber").GetInt32() + 1;
+            if (inPage && options.PageLineOffset > 0)
+            {
+                // Inside what the server put in front of the page: no line of the page's file to point at.
+                if (line <= options.PageLineOffset) fields.Add(("injected", true));
+                else line -= options.PageLineOffset;
+            }
+            fields.Add(("line", line));
             fields.Add(("column", details.GetProperty("columnNumber").GetInt32() + 1));
             Add(kind, Fields(fields.ToArray()));
         }

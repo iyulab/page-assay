@@ -135,4 +135,15 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         Assert.Equal("x", finding["message"]!.ToString());
         Assert.Contains("Chrome", json["context"]!["engine"]!.ToString(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Lines_are_counted_in_the_pages_own_file_when_the_server_put_markup_in_front_of_it()
+    {
+        const string injected = "<script>/* a serving origin's own script */</script>\n<meta name=\"x\">\n";
+        var page = _site.Page("index.html", injected + "<!doctype html>\n<script>\nmissing();\n</script>");
+        var report = await Run(page, new AssayOptions { PageLineOffset = 2 });
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal(3, (int)finding.Fields["line"]!);
+        Assert.False(finding.Fields.ContainsKey("injected"));
+    }
 }

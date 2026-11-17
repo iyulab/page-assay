@@ -142,27 +142,28 @@ The report carries a `context` block:
 
 ## Where findings come from
 
-The browser half collects errors through the page's origin rather than re-implementing collection: a local-origin preview origin
-already places a problem-report script in front of the page and maps lines to the page's own file. page-assay reads those reports
-and adds what only a driver sees (settling, covering, language, text contrast, unnamed fields, interaction, resources that never arrived). local-origin's
-`load-error` and `error` become `uncaught` / `rejection` / `console-error` with `phase` `load` or `use`; its `blocked` is `blocked`.
+page-assay collects everything through the driver itself: errors and rejections from the runtime's exception events, console errors,
+requests and responses, and what the look checks measure in an isolated world the page cannot see. It needs nothing from the origin
+that serves the page beyond the page itself — any origin works, a local-origin preview origin included.
+
+One thing only the serving origin knows: whether it put markup in front of the page (a preview origin injects its problem-report and
+key scripts). The caller passes that as `PageLineOffset`, and lines in the page's own file are reported minus it. An error inside the
+injected part carries `injected: true` and its raw line.
 
 ## Open questions
 
-1. **Problem reports carry their kind and position as fields.** Today local-origin's problem-report wire has `load-error`,
-   `error` and `blocked`; an uncaught error, a rejection and a `console.error` all arrive as `error`, with the line inside the
-   message text. The report above needs `uncaught` / `rejection` / `console-error` and `line` / `column` as separate fields —
-   an additive change on local-origin's wire.
-2. **A settled signal from the origin, or from the driver?** The origin sees the page's requests; the driver sees the document.
-   Proposal: local-origin reports pending requests and quiet time; page-assay combines it with the document's mutations.
-3. **Reading reports while the page runs.** A long interaction run should not wait for the end: local-origin's preview report
-   needs a cursor ("findings since N") or a stream.
-4. **Limits.** local-origin keeps 20 entries per preview; page-assay keeps its own cap (proposal: 50) and sets `truncated`.
+1. ~~Problem reports carry their kind and position as fields~~ — no longer needed by page-assay: it reads the exception events directly
+   (see «Where findings come from»). A change to local-origin's wire stays that library's own question.
+2. ~~A settled signal from the origin, or from the driver?~~ — the driver: no pending request, and no document change for a quiet
+   period, measured in an isolated world.
+3. ~~Reading reports while the page runs~~ — events arrive as they happen over the driver.
+4. **Limits.** Per kind (default 3, per comparison status) with a `more` count, and a total (default 50) with `truncated`.
 5. **Interaction steps** — their vocabulary is the next design, after the report settles.
 6. **A context it cannot match.** When the caller asks for a context the driver cannot give (a different engine, a real GPU), does the run fail, or run and state the difference in `context`? Proposal: run, and state it — the caller decides whether the difference matters.
-7. **Where the policy comes from.** The caller passes the policy it serves with (as headers, or a reference the origin library can resolve). Whether page-assay reads it from the origin it drives or takes it as a parameter depends on the first open question above.
-8. **The keys of driven findings.** A `text-contrast` or `unnamed-field` finding keys on its selector; a generated page often has no
-   stable ids, so a positional selector can shift when an element is inserted before it. Proposal: key on the nearest id or label
-   plus the element's text, and fall back to the positional selector only when neither exists.
+7. **Where the policy comes from.** The caller passes the policy it serves with (as headers, or a reference the origin library can resolve). Proposal: a parameter — page-assay reads nothing else from the origin (see «Where findings come from»).
+8. **The keys of driven findings.** Built so far: `text-contrast` keys on its colour pair and threshold, `unnamed-field` on the text
+   beside it (its selector only when there is none), `error-on-screen` on selector and text. A generated page often has no stable ids,
+   so a positional selector can shift when an element is inserted before it. Proposal for the rest: the nearest id or label plus the
+   element's text, the positional selector only when neither exists.
 9. **The template wording of `text`** is part of what a caller may rely on (a model is prompted with it). Proposal: changing a
    template is a minor version, listed in the changelog.
