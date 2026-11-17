@@ -46,6 +46,10 @@ public sealed record Finding(string Kind, Severity Severity, string Text, Phase?
     /// (the kind and the name, URL, selector or colours it is about), never from a line number.</summary>
     public string Key { get; } = FindingKinds.KeyOf(Kind, Fields);
 
+    /// <summary>True when the version compared broke the parse of more scripts than the previous one: the finding may be an
+    /// effect of that, not a defect of its own.</summary>
+    public bool Deferred { get; init; }
+
     /// <summary>Set when two versions were compared; null otherwise.</summary>
     public Comparison? Status { get; init; }
 
@@ -61,6 +65,8 @@ public sealed record Finding(string Kind, Severity Severity, string Text, Phase?
         json["key"] = Key;
         if (Status is { } status)
             json["status"] = status switch { Comparison.New => "new", Comparison.Kept => "kept", _ => "gone" };
+        if (Deferred)
+            json["deferred"] = true;
         if (Phase is { } phase)
             json["phase"] = phase == PageAssay.Phase.Load ? "load" : "use";
         foreach (var (name, value) in Fields)
@@ -87,6 +93,7 @@ public sealed record RunContext(string Engine, bool Headless, string Origin, IRe
         ["origin"] = Origin,
         ["viewports"] = new JsonArray(Viewports.Select(v => (JsonNode)new JsonObject { ["width"] = v.Width, ["height"] = v.Height, ["scale"] = 1 }).ToArray()),
         ["colorSchemes"] = new JsonArray(ColorSchemes.Select(s => (JsonNode)s).ToArray()),
+        ["templates"] = FindingKinds.TemplatesVersion,
     };
 }
 
@@ -121,6 +128,16 @@ public static class FindingKinds
     public const string ErrorOnScreen = "error-on-screen";
     /// <summary>Visible text does not stand out enough from what is behind it (WCAG 2.x).</summary>
     public const string TextContrast = "text-contrast";
+    /// <summary>A script or event-handler attribute does not parse.</summary>
+    public const string Syntax = "syntax";
+    /// <summary>A table whose rows do not have as many cells as its header has columns.</summary>
+    public const string TableShape = "table-shape";
+    /// <summary>An element marked [hidden] is shown anyway and covers most of the window.</summary>
+    public const string Covering = "covering";
+
+    /// <summary>The version of the one-line text templates; it changes with any template's wording (a minor version of the package).</summary>
+    public const string TemplatesVersion = "1";
+
     /// <summary>The page is wider than the viewport: a person has to scroll sideways.</summary>
     public const string Overflow = "overflow";
     /// <summary>A visible field has no name a screen reader can read.</summary>
@@ -135,7 +152,7 @@ public static class FindingKinds
     /// <summary>The default severity of a kind; a caller overrides it per kind in <see cref="AssayOptions.Severities"/>.</summary>
     public static Severity DefaultSeverity(string kind) => kind switch
     {
-        ConsoleError or TextContrast or UnnamedField or Overflow or More => Severity.Notice,
+        ConsoleError or TextContrast or UnnamedField or Overflow or TableShape or More => Severity.Notice,
         _ => Severity.Block,
     };
 
@@ -151,6 +168,8 @@ public static class FindingKinds
             Blocked => $"{S("category")}|{S("host")}",
             TextContrast => $"{S("foreground")}|{S("background")}|{S("needed")}",
             Overflow => S("viewport"),
+            TableShape => f.TryGetValue("columns", out var cols) && cols is not null ? cols.ToJsonString() : S("selector"),
+            Covering => S("selector"),
             UnnamedField => f.ContainsKey("nearText") ? "near:" + S("nearText") : S("selector"),
             More => S("of"),
             _ => string.Join("|", f.Where(p => p.Key is not ("line" or "column" or "count")).OrderBy(p => p.Key, StringComparer.Ordinal)
@@ -176,6 +195,8 @@ public static class FindingKinds
                 : $"The file {S("url")} did not arrive.",
             Blocked => $"A request to {S("host")} was refused: the page must work without other hosts.",
             TextContrast => $"Text in {S("selector")} is hard to read ({S("scheme")}, {S("viewport")}): {S("foreground")} on {S("background")} has contrast {S("ratio")}:1, needs {S("needed")}:1 ({S("count")} element(s), e.g. \"{S("text")}\").",
+            TableShape => $"The table {S("selector")} has {S("rows")} row(s) whose cell count ({S("cells")}) does not match its header's columns: values sit under the wrong headers.",
+            Covering => $"{S("selector")} is marked hidden but shown ({S("display")}), covering {S("area")} of the window: nothing under it can be used.",
             Overflow => $"At {S("viewport")} ({S("scheme")}) the page is {S("by")} px wider than the window: a person has to scroll sideways.",
             UnnamedField => f.ContainsKey("nearText")
                 ? $"The field {S("selector")} has no name a screen reader can read (the text beside it: \"{S("nearText")}\")."

@@ -119,4 +119,43 @@ public sealed class LookTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         Assert.Equal("390x844", finding.Fields["viewport"]!.ToString());
         Assert.True((int)finding.Fields["by"]! > 400);
     }
+
+    [Fact]
+    public async Task A_table_whose_rows_do_not_match_its_header_is_a_table_shape_finding()
+    {
+        var report = await Run("""
+            <!doctype html>
+            <table id="t"><thead><tr><th>Date</th><th>Item</th><th>Amount</th></tr></thead>
+            <tbody><tr><td>1</td><td>a</td><td>3</td></tr><tr><td>2</td><td>b</td></tr><tr><td colspan="2">x</td><td>4</td></tr></tbody></table>
+            <table><tr><th>A</th></tr><tr><td rowspan="2">skipped</td></tr><tr></tr></table>
+            """);
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal(FindingKinds.TableShape, finding.Kind);
+        Assert.Equal("#t", finding.Fields["selector"]!.ToString());
+        Assert.Equal(1, (int)finding.Fields["rows"]!);
+        Assert.Equal("[\"Date\",\"Item\",\"Amount\"]", finding.Fields["columns"]!.ToJsonString());
+        Assert.Equal("[2]", finding.Fields["cells"]!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task A_hidden_overlay_shown_anyway_covers_the_page_but_a_full_page_app_root_does_not()
+    {
+        var report = await Run("""
+            <!doctype html><style>.modal { display: flex; position: fixed; inset: 0; background: rgba(0,0,0,.4) }</style>
+            <div id="app" style="position:fixed;inset:0">the app</div>
+            <div id="dialog" class="modal" hidden><p style="color:#fff;background:#000">Saved</p></div>
+            <div hidden>really hidden</div>
+            """);
+        var finding = Assert.Single(report.Findings, f => f.Kind == FindingKinds.Covering);
+        Assert.Equal("#dialog", finding.Fields["selector"]!.ToString());
+        Assert.Equal("flex", finding.Fields["display"]!.ToString());
+        Assert.Equal(Severity.Block, finding.Severity);
+    }
+
+    [Fact]
+    public async Task The_context_names_the_template_version()
+    {
+        var report = await Run("<!doctype html><p>x</p>");
+        Assert.Equal(FindingKinds.TemplatesVersion, report.ToJson()["context"]!["templates"]!.ToString());
+    }
 }

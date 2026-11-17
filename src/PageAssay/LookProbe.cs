@@ -146,7 +146,42 @@ internal static class LookProbe
           }
 
           const overflow = Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth);
-          return { errorText, contrast: [...contrast.values()], unnamed, overflow };
+
+          // A table whose rows do not have as many cells as its header has columns: the values sit under the wrong headers, and
+          // nothing errors. Spans are counted; a table with a row span is skipped, not guessed.
+          const tables = [];
+          const width = (row) => [...row.cells].reduce((n, c) => n + (c.colSpan || 1), 0);
+          for (const table of document.querySelectorAll('table')) {
+            if (!rendered(table) || [...table.querySelectorAll('td, th')].some(c => (c.rowSpan || 1) > 1)) continue;
+            const rows = [...table.rows];
+            const header = (table.tHead && table.tHead.rows[0]) || rows.find(r => r.cells.length && [...r.cells].every(c => c.tagName === 'TH'));
+            if (!header) continue;
+            const columns = width(header);
+            const off = rows.filter(r => r !== header && r.parentElement !== table.tHead && r.cells.length > 0 && width(r) !== columns);
+            if (off.length === 0) continue;
+            tables.push({
+              selector: selectorOf(table),
+              columns: [...header.cells].map(c => c.textContent.trim().slice(0, 40)).slice(0, 12),
+              rows: off.length,
+              cells: [...new Set(off.map(width))].sort((a, b) => a - b),
+            });
+          }
+
+          // An element the page marked [hidden] that is shown anyway and covers most of the window — a generated
+          // `.modal { display: flex }` overriding [hidden], with nothing under it clickable. A full-page app root is never [hidden].
+          const covering = [];
+          const viewArea = innerWidth * innerHeight;
+          for (const el of document.querySelectorAll('[hidden]')) {
+            const s = getComputedStyle(el);
+            if (s.display === 'none' || s.visibility === 'hidden' || s.pointerEvents === 'none') continue;
+            const r = el.getBoundingClientRect();
+            const w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0));
+            const h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+            const area = viewArea > 0 ? (w * h) / viewArea : 0;
+            if (area >= 0.5) covering.push({ selector: selectorOf(el), display: s.display, area: Math.round(area * 100) / 100 });
+          }
+
+          return { errorText, contrast: [...contrast.values()], unnamed, overflow, tables, covering };
         })()
         """;
 }

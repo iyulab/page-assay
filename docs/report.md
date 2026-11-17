@@ -57,7 +57,8 @@ Every finding has a `kind` and the fields that kind needs. Fields absent from a 
 | `error-on-screen` | block | The visible text holds a JavaScript engine's error sentence (`Cannot access 'x' before initialization`, `… is not a function`): the page caught an exception and printed its message, so no error report and no console line exists. | `selector`, `text`, `phase` |
 | `resource` | block | A file the page asked for from its own origin did not arrive (missing, server error, a dropped connection). Requests the browser makes on its own (a favicon) are not the page's and are not reported. | `url`, `status`? or `error`? |
 | `blocked` | block | Something was refused: by the content security policy (`library` · `data` · `form`), or by the run itself because it went to another host (`network`). | `category`, `host`, `url`? |
-| `covering` | block | An element covers the page. | `selector`, `area` (fraction of the viewport, 0–1) |
+| `covering` | block | An element the page marked `[hidden]` is shown anyway (not `display:none`, not `visibility:hidden`, not `pointer-events:none`) and covers at least half of the window — a generated overlay overriding `[hidden]`, with nothing under it usable. A full-page app root is never `[hidden]`, so it never fires on one. | `selector`, `display`, `area` (fraction of the viewport) |
+| `table-shape` | notice | A table whose rows do not have as many cells as its header has columns (spans counted; a table with a row span is skipped): values sit under the wrong headers with no error. Limit 2 per page by default. | `selector`, `columns` (header names), `rows` (how many are off), `cells` (the counts seen) |
 | `overflow` | notice | At one of the run's viewports the page is wider than the window, so a person has to scroll sideways. | `by` (px), `viewport`, `scheme` |
 | `language` | notice | The visible text is mostly in another script than the caller expects. | `expected`, `observed`, `ratio` |
 | `text-contrast` | notice | Visible text does not stand out enough from what is behind it (WCAG 2.x: 4.5:1, 3:1 for large text), measured on the composited colours, over the page's canvas as its colour scheme resolves it. Looked at in every viewport and colour scheme of the run; the same colour pair is one finding, reported with the `scheme` and `viewport` it was first seen in. An empty field is measured with its `::placeholder` colour; transparent text is skipped; text over a picture or a gradient is skipped, not guessed. Findings with the same colour pair are one finding. | `selector`, `text`, `foreground`, `background`, `ratio`, `needed`, `count` (elements with the same pair) |
@@ -73,6 +74,7 @@ Shared fields:
 - **`text`** — the one-line English summary described at the top, from a fixed template per kind.
 - **`severity`** — `block` or `notice` (see «Severity and limits»).
 - **`key`** — the finding's identity across two versions of a page (see «Comparing two versions»).
+- **`deferred`** (`true` or omitted) — in a comparison whose new version has more `syntax` findings than the old, every other finding: nothing else measured on a version whose scripts do not parse can be trusted. They keep their status, for a caller that drops or shows them.
 - **`status`** — `new`, `kept` or `gone`, only when two versions were compared. The per-kind limit applies per kind *and* status, so the findings a change caused are never crowded out by old ones.
 
 - **`line` / `column` are counted in the page's own file**, not in the document the browser received — whatever a server put in
@@ -124,7 +126,8 @@ The report carries a `context` block:
   "serviceWorkers": "allow",           // "allow" or "block"
   "viewports": [ { "width": 1280, "height": 800, "scale": 1 } ],
   "colorSchemes": [ "light", "dark" ],
-  "returningVisit": true               // the page was loaded a second time in the same storage
+  "returningVisit": true,              // the page was loaded a second time in the same storage
+  "templates": "1"                     // the version of the one-line text templates (see open question 9)
 }
 ```
 

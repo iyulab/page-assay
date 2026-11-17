@@ -35,6 +35,9 @@ public sealed record AssayOptions
     /// <summary>At most this many findings of one kind; the rest are counted in one <c>more</c> finding.</summary>
     public int PerKindLimit { get; init; } = 3;
 
+    /// <summary>Per-kind limits that differ from <see cref="PerKindLimit"/> (default: <c>table-shape</c> 2).</summary>
+    public IReadOnlyDictionary<string, int> PerKindLimits { get; init; } = new Dictionary<string, int> { [FindingKinds.TableShape] = 2 };
+
     /// <summary>At most this many findings in all; past it the report is truncated.</summary>
     public int TotalLimit { get; init; } = 50;
 
@@ -89,6 +92,10 @@ public static class Assayer
             marked.Add(finding with { Status = kept ? Comparison.Kept : Comparison.New });
         }
         marked.AddRange(unmatched.Values.SelectMany(q => q).Select(f => f with { Status = Comparison.Gone }));
+        // A change that breaks the parse of more scripts than before: nothing else measured on that version can be trusted, so every
+        // other finding is marked deferred — still reported with its status, for a caller that drops or shows them.
+        if (current.Findings.Count(f => f.Kind == FindingKinds.Syntax) > previous.Findings.Count(f => f.Kind == FindingKinds.Syntax))
+            marked = marked.Select(f => f.Kind == FindingKinds.Syntax ? f : f with { Deferred = true }).ToList();
         return Limit(current with { Findings = marked }, options);
     }
 
@@ -108,7 +115,7 @@ public static class Assayer
         {
             var group = (finding.Kind, finding.Status);
             var seen = counts.GetValueOrDefault(group);
-            if (seen < options.PerKindLimit) kept.Add(finding);
+            if (seen < options.PerKindLimits.GetValueOrDefault(finding.Kind, options.PerKindLimit)) kept.Add(finding);
             else cut[group] = cut.GetValueOrDefault(group) + 1;
             counts[group] = seen + 1;
         }
@@ -277,6 +284,13 @@ public static class Assayer
                     ("count", item.GetProperty("count").GetInt32()), .. seenIn]));
             // What follows does not depend on the scheme or the width: looked at once.
             if (!first) return;
+            foreach (var item in look.GetProperty("tables").EnumerateArray())
+                Add(FindingKinds.TableShape, Fields(("selector", item.GetProperty("selector").GetString()),
+                    ("columns", JsonNode.Parse(item.GetProperty("columns").GetRawText())), ("rows", item.GetProperty("rows").GetInt32()),
+                    ("cells", JsonNode.Parse(item.GetProperty("cells").GetRawText()))));
+            foreach (var item in look.GetProperty("covering").EnumerateArray())
+                Add(FindingKinds.Covering, Fields(("selector", item.GetProperty("selector").GetString()),
+                    ("display", item.GetProperty("display").GetString()), ("area", item.GetProperty("area").GetDouble())));
             // The page caught an exception and printed its message: no error event and no console line exist, only the text.
             foreach (var item in look.GetProperty("errorText").EnumerateArray())
                 Add(FindingKinds.ErrorOnScreen, Fields(("selector", item.GetProperty("selector").GetString()),
