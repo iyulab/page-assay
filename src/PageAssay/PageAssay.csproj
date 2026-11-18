@@ -1,14 +1,20 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Description>Checks a web page without AI: drives it over the Chrome DevTools Protocol, collects what went wrong while it loaded and in use, and returns a typed report. No dependencies.</Description>
-    <PackageTags>web;page;check;cdp;devtools;accessibility;contrast</PackageTags>
+    <Description>Checks a web page without AI: drives it over the Chrome DevTools Protocol, collects what went wrong while it loaded and in use, and returns a typed report. Static rules read the page's inline scripts and markup without running them.</Description>
+    <PackageTags>web;page;check;cdp;devtools;accessibility;contrast;static-analysis</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <InternalsVisibleTo Include="PageAssay.Tests" />
+    <EmbeddedResource Include="Static\*.txt" LogicalName="PageAssay.Static.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Acornima" Version="1.9.2" />
+    <PackageReference Include="AngleSharp" Version="1.10.5" />
   </ItemGroup>
 
 </Project>
