@@ -44,7 +44,7 @@ public sealed record Finding(string Kind, Severity Severity, string Text, Phase?
 {
     /// <summary>The finding's identity across two versions of a page: built from what survives an edit elsewhere in the file
     /// (the kind and the name, URL, selector or colours it is about), never from a line number.</summary>
-    public string Key { get; } = FindingKinds.KeyOf(Kind, Fields);
+    public string Key { get; init; } = FindingKinds.KeyOf(Kind, Fields);
 
     /// <summary>True when the version compared broke the parse of more scripts than the previous one: the finding may be an
     /// effect of that, not a defect of its own.</summary>
@@ -82,37 +82,56 @@ public sealed record Viewport(int Width, int Height)
     public override string ToString() => string.Create(CultureInfo.InvariantCulture, $"{Width}x{Height}");
 }
 
-/// <summary>The browser context a run ran in.</summary>
-public sealed record RunContext(string Engine, bool Headless, string Origin, IReadOnlyList<Viewport> Viewports, IReadOnlyList<string> ColorSchemes)
+/// <summary>The context a run ran in: which halves ran, and the browser context of the driven half.</summary>
+/// <remarks>A static-only run has no browser: <see cref="Engine"/> and <see cref="Origin"/> are null and the lists are empty.</remarks>
+public sealed record RunContext(string? Engine, bool Headless, string? Origin, IReadOnlyList<Viewport> Viewports, IReadOnlyList<string> ColorSchemes)
 {
-    /// <summary>The context in the report's JSON shape.</summary>
-    public JsonObject ToJson() => new()
+    /// <summary>The static rules read the page's source.</summary>
+    public bool Static { get; init; }
+
+    /// <summary>The page was loaded in a browser.</summary>
+    public bool Driven => Engine is not null;
+
+    /// <summary>The context of a run that only read the source.</summary>
+    public static RunContext StaticOnly { get; } = new(null, false, null, [], []) { Static = true };
+
+    /// <summary>The context in the report's JSON shape; the browser's fields only when the page was driven.</summary>
+    public JsonObject ToJson()
     {
-        ["engine"] = Engine,
-        ["headless"] = Headless,
-        ["origin"] = Origin,
-        ["viewports"] = new JsonArray(Viewports.Select(v => (JsonNode)new JsonObject { ["width"] = v.Width, ["height"] = v.Height, ["scale"] = 1 }).ToArray()),
-        ["colorSchemes"] = new JsonArray(ColorSchemes.Select(s => (JsonNode)s).ToArray()),
-        ["templates"] = FindingKinds.TemplatesVersion,
-    };
+        var json = new JsonObject { ["static"] = Static, ["driven"] = Driven };
+        if (Driven)
+        {
+            json["engine"] = Engine;
+            json["headless"] = Headless;
+            json["origin"] = Origin;
+            json["viewports"] = new JsonArray(Viewports.Select(v => (JsonNode)new JsonObject { ["width"] = v.Width, ["height"] = v.Height, ["scale"] = 1 }).ToArray());
+            json["colorSchemes"] = new JsonArray(ColorSchemes.Select(s => (JsonNode)s).ToArray());
+        }
+        json["templates"] = FindingKinds.TemplatesVersion;
+        return json;
+    }
 }
 
-/// <summary>What a run returns.</summary>
-public sealed record AssayReport(string Page, bool Loaded, long? SettledMs, IReadOnlyList<Finding> Findings, bool Truncated, RunContext Context)
+/// <summary>What a run returns. <see cref="Loaded"/> is null when the page was not driven (a static-only run).</summary>
+public sealed record AssayReport(string Page, bool? Loaded, long? SettledMs, IReadOnlyList<Finding> Findings, bool Truncated, RunContext Context)
 {
     /// <summary>True when any finding blocks.</summary>
     public bool Blocks => Findings.Any(f => f.Severity == Severity.Block);
 
-    /// <summary>The report in its JSON shape.</summary>
-    public JsonObject ToJson() => new()
+    /// <summary>The report in its JSON shape (<c>loaded</c> and <c>settledMs</c> only when the page was driven).</summary>
+    public JsonObject ToJson()
     {
-        ["page"] = Page,
-        ["loaded"] = Loaded,
-        ["settledMs"] = SettledMs,
-        ["findings"] = new JsonArray(Findings.Select(f => (JsonNode)f.ToJson()).ToArray()),
-        ["truncated"] = Truncated,
-        ["context"] = Context.ToJson(),
-    };
+        var json = new JsonObject { ["page"] = Page };
+        if (Loaded is { } loaded)
+        {
+            json["loaded"] = loaded;
+            json["settledMs"] = SettledMs;
+        }
+        json["findings"] = new JsonArray(Findings.Select(f => (JsonNode)f.ToJson()).ToArray());
+        json["truncated"] = Truncated;
+        json["context"] = Context.ToJson();
+        return json;
+    }
 }
 
 /// <summary>The kinds this library reports, with their default severity and the template of their one-line text.</summary>
@@ -130,6 +149,16 @@ public static class FindingKinds
     public const string TextContrast = "text-contrast";
     /// <summary>A script or event-handler attribute does not parse.</summary>
     public const string Syntax = "syntax";
+    /// <summary>A name is called but defined nowhere the call can reach.</summary>
+    public const string UndefinedCall = "undefined-call";
+    /// <summary>Code looks an element up by an id the markup does not have.</summary>
+    public const string MissingId = "missing-id";
+    /// <summary>Two or more elements in the markup carry the same id.</summary>
+    public const string DuplicateId = "duplicate-id";
+    /// <summary>Code or markup would reach another host.</summary>
+    public const string OutsideReference = "outside-reference";
+    /// <summary>The page reads a name while it starts, before the line that gives it a value.</summary>
+    public const string ReadBeforeSet = "read-before-set";
     /// <summary>A table whose rows do not have as many cells as its header has columns.</summary>
     public const string TableShape = "table-shape";
     /// <summary>An element marked [hidden] is shown anyway and covers most of the window.</summary>
@@ -152,11 +181,13 @@ public static class FindingKinds
     /// <summary>The default severity of a kind; a caller overrides it per kind in <see cref="AssayOptions.Severities"/>.</summary>
     public static Severity DefaultSeverity(string kind) => kind switch
     {
-        ConsoleError or TextContrast or UnnamedField or Overflow or TableShape or More => Severity.Notice,
+        ConsoleError or TextContrast or UnnamedField or Overflow or TableShape or DuplicateId or More => Severity.Notice,
         _ => Severity.Block,
     };
 
-    internal static string KeyOf(string kind, IReadOnlyDictionary<string, JsonNode?> f)
+    // anchor: identity a finding has that is not one of its fields — the script (its content hash) or the handler attribute
+    // (its element's id or label, and the event) a static finding is in, the host of an outside reference.
+    internal static string KeyOf(string kind, IReadOnlyDictionary<string, JsonNode?> f, string? anchor = null)
     {
         string S(string name) => f.TryGetValue(name, out var v) && v is not null ? v.ToString() : "";
         var subject = kind switch
@@ -172,6 +203,11 @@ public static class FindingKinds
             Covering => S("selector"),
             UnnamedField => f.ContainsKey("nearText") ? "near:" + S("nearText") : S("selector"),
             More => S("of"),
+            Syntax => anchor ?? S("source"),
+            UndefinedCall => anchor is null ? $"{S("name")}|{S("reason")}" : $"{S("name")}|{S("reason")}|{anchor}",
+            MissingId or DuplicateId => S("id"),
+            OutsideReference => $"{S("rule")}|{anchor ?? S("url")}",
+            ReadBeforeSet => $"{S("call")}|{S("name")}",
             _ => string.Join("|", f.Where(p => p.Key is not ("line" or "column" or "count")).OrderBy(p => p.Key, StringComparer.Ordinal)
                 .Select(p => $"{p.Key}={p.Value}")),
         };
@@ -181,6 +217,7 @@ public static class FindingKinds
     internal static string TextOf(string kind, IReadOnlyDictionary<string, JsonNode?> f)
     {
         string S(string name) => f.TryGetValue(name, out var v) && v is not null ? v.ToString() : "";
+        string Lines() => f.TryGetValue("lines", out var l) && l is JsonArray a ? string.Join(", ", a.Select(n => n?.ToString())) : "";
         string At() => f.ContainsKey("line")
             ? string.Create(CultureInfo.InvariantCulture, $" at line {S("line")}, column {S("column")}")
             : "";
@@ -202,6 +239,18 @@ public static class FindingKinds
                 ? $"The field {S("selector")} has no name a screen reader can read (the text beside it: \"{S("nearText")}\")."
                 : $"The field {S("selector")} has no name a screen reader can read.",
             More => $"{S("count")} more {S("of")} findings were left out.",
+            Syntax => f.ContainsKey("hides")
+                ? $"The {S("source")} does not parse{At()}: {S("message")} ({S("hides")} call(s) to names it would define are not reported apart)."
+                : $"The {S("source")} does not parse{At()}: {S("message")}",
+            UndefinedCall => S("reason") == "not-global"
+                ? $"{S("name")}() is called as a global{At()}, but it exists only inside a function or a module script."
+                : $"{S("name")}() is called{At()}, but nothing defines it.",
+            MissingId => $"The code looks up the id \"{S("id")}\"{At()}, but no element has it.",
+            DuplicateId => $"{S("count")} elements have the id \"{S("id")}\" (lines {Lines()}): a lookup finds only the first.",
+            OutsideReference => $"{S("url")}{At()} is on another host ({S("rule")}): the page must work without other hosts.",
+            ReadBeforeSet => (f.ContainsKey("call") ? $"While {S("call")}() runs at start, " : "At start, ")
+                + $"{S("name")} is read{At()} before line {S("setAt")} gives it a value: "
+                + (S("throws") == "true" ? "the read throws." : "it is undefined there."),
             _ => kind,
         };
     }

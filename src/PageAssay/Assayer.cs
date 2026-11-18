@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using PageAssay.Cdp;
+using PageAssay.Static;
 
 namespace PageAssay;
 
@@ -43,9 +44,13 @@ public sealed record AssayOptions
 
     /// <summary>Severity per kind, overriding <see cref="FindingKinds.DefaultSeverity"/>.</summary>
     public IReadOnlyDictionary<string, Severity> Severities { get; init; } = new Dictionary<string, Severity>();
+
+    /// <summary>Whether a driven run also reads the page's source with the static rules (default true). The source is the
+    /// document the browser received, minus the <see cref="PageLineOffset"/> lines the serving origin put in front of it.</summary>
+    public bool StaticRules { get; init; } = true;
 }
 
-/// <summary>Runs a page in a browser and reports what went wrong.</summary>
+/// <summary>Checks a page and reports what is wrong: by reading its source (the static rules), and by running it in a browser.</summary>
 public static class Assayer
 {
     private const string World = "page-assay";
@@ -82,7 +87,42 @@ public static class Assayer
         Validate(options);
         var previous = await RunAllAsync(browser, before, options, cancellationToken).ConfigureAwait(false);
         var current = await RunAllAsync(browser, after, options, cancellationToken).ConfigureAwait(false);
+        return Limit(Compare(previous, current), options);
+    }
 
+    /// <summary>
+    /// Reads a page's source with the static rules only — no browser, nothing run. <paramref name="source"/> is the page's HTML as
+    /// it is in its file; lines and columns are counted in it. <paramref name="page"/> is the caller's name for the page.
+    /// <paramref name="origin"/>, when given, is the origin the page will be served on: absolute URLs on it are not another host.
+    /// </summary>
+    public static AssayReport RunStatic(string page, string source, Uri? origin = null, AssayOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        ArgumentNullException.ThrowIfNull(source);
+        options ??= new AssayOptions();
+        return Limit(Static(page, source, origin, options), options);
+    }
+
+    /// <summary>
+    /// Compares two versions of a page's source with the static rules only: the findings of <paramref name="after"/> marked
+    /// <see cref="Comparison.New"/> or <see cref="Comparison.Kept"/>, plus those of <paramref name="before"/> the change fixed,
+    /// marked <see cref="Comparison.Gone"/> — the same comparison <see cref="CompareAsync"/> makes, without a browser.
+    /// </summary>
+    public static AssayReport CompareStatic(string page, string before, string after, Uri? origin = null, AssayOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        options ??= new AssayOptions();
+        return Limit(Compare(Static(page, before, origin, options), Static(page, after, origin, options)), options);
+    }
+
+    private static AssayReport Static(string page, string source, Uri? origin, AssayOptions options) =>
+        new(page, null, null, StaticRules.Run(source, origin, options), false, RunContext.StaticOnly);
+
+    // Marks the current version's findings new or kept and adds the previous version's that are gone, matching by key.
+    private static AssayReport Compare(AssayReport previous, AssayReport current)
+    {
         var unmatched = previous.Findings.GroupBy(f => f.Key, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => new Queue<Finding>(g), StringComparer.Ordinal);
         var marked = new List<Finding>();
@@ -96,7 +136,7 @@ public static class Assayer
         // other finding is marked deferred — still reported with its status, for a caller that drops or shows them.
         if (current.Findings.Count(f => f.Kind == FindingKinds.Syntax) > previous.Findings.Count(f => f.Kind == FindingKinds.Syntax))
             marked = marked.Select(f => f.Kind == FindingKinds.Syntax ? f : f with { Deferred = true }).ToList();
-        return Limit(current with { Findings = marked }, options);
+        return current with { Findings = marked };
     }
 
     private static void Validate(AssayOptions options)
@@ -172,6 +212,7 @@ public static class Assayer
         private readonly HashSet<string> _pendingRequests = [];
         private readonly Dictionary<string, string> _requestUrls = new(StringComparer.Ordinal);
         private readonly HashSet<string> _browserOwn = new(StringComparer.Ordinal);
+        private string? _documentRequest;
         private readonly Stopwatch _clock = new();
         private long _lastNetworkMs;
         private long? _loadMs;
@@ -197,7 +238,7 @@ public static class Assayer
             if (navigation.TryGetProperty("errorText", out var navigationError))
             {
                 Add(FindingKinds.Resource, Fields(("url", PathOf(page)), ("error", navigationError.GetString())));
-                return Build(loaded: false, settledMs: null, context);
+                return Build(loaded: false, settledMs: null, context, []);
             }
 
             var loaded = await WaitAsync(() => _loadMs is not null, options.LoadTimeout, cancellationToken).ConfigureAwait(false);
@@ -230,7 +271,34 @@ public static class Assayer
                 }
             }
             cdp.EventReceived = null;
-            return Build(loaded, settledMs, context);
+            var found = loaded && options.StaticRules ? await StaticAsync(cancellationToken).ConfigureAwait(false) : null;
+            return Build(loaded, settledMs, context with { Static = found is not null }, found ?? []);
+        }
+
+        // The static rules over the document the browser received, minus what the serving origin put in front of the page.
+        private async Task<List<Finding>?> StaticAsync(CancellationToken cancellationToken)
+        {
+            string? request;
+            lock (_gate) request = _documentRequest;
+            if (request is null) return null;
+            JsonElement body;
+            try
+            {
+                body = await Send("Network.getResponseBody", new JsonObject { ["requestId"] = request }, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CdpException)
+            {
+                return null; // the browser no longer holds the body; the report states that the static rules did not run
+            }
+            var text = body.GetProperty("body").GetString() ?? "";
+            if (body.GetProperty("base64Encoded").GetBoolean())
+                text = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(text));
+            for (var skip = 0; skip < options.PageLineOffset; skip++)
+            {
+                var newline = text.IndexOf('\n', StringComparison.Ordinal);
+                text = newline < 0 ? "" : text[(newline + 1)..];
+            }
+            return StaticRules.Run(text, page.IsFile ? null : new Uri(page.GetLeftPart(UriPartial.Authority)), options);
         }
 
         private async Task<bool> IsQuietAsync(CancellationToken cancellationToken)
@@ -360,6 +428,9 @@ public static class Assayer
                             && p.TryGetProperty("type", out var requestType) && requestType.GetString() != "Document")
                             _browserOwn.Add(p.GetProperty("requestId").GetString()!);
                         _lastNetworkMs = _clock.ElapsedMilliseconds;
+                        if (p.TryGetProperty("type", out var documentType) && documentType.GetString() == "Document"
+                            && p.TryGetProperty("frameId", out var requestFrame) && requestFrame.GetString() == frameId)
+                            _documentRequest = p.GetProperty("requestId").GetString();
                     }
                     break;
                 case "Network.responseReceived":
@@ -483,10 +554,11 @@ public static class Assayer
             }
         }
 
-        private AssayReport Build(bool loaded, long? settledMs, RunContext context)
+        // The static findings first (they are about the file, before anything ran), then the driven ones in the order they happened.
+        private AssayReport Build(bool loaded, long? settledMs, RunContext context, List<Finding> fromSource)
         {
             List<Finding> all;
-            lock (_gate) all = _found.OrderBy(f => f.At).Select(f => f.Finding).ToList();
+            lock (_gate) all = [.. fromSource, .. _found.OrderBy(f => f.At).Select(f => f.Finding)];
             return new AssayReport(PathOf(page), loaded, settledMs, all, Truncated: false, context);
         }
 

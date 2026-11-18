@@ -19,6 +19,15 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
     public void Dispose() => _site.Dispose();
 
     [Fact]
+    public async Task Static_rules_can_be_left_out_of_a_driven_run()
+    {
+        var page = _site.Page("index.html", "<!doctype html><p id=a></p><p id=a></p>");
+        var report = await Run(page, new AssayOptions { StaticRules = false });
+        Assert.Empty(report.Findings);
+        Assert.False((bool)report.ToJson()["context"]!["static"]!);
+    }
+
+    [Fact]
     public async Task A_clean_page_loads_settles_and_finds_nothing()
     {
         var page = _site.Page("index.html", "<!doctype html><title>t</title><p>Hello</p>");
@@ -35,12 +44,17 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
     {
         var page = _site.Page("index.html", "<!doctype html>\n<p>x</p>\n<script>\nlet a = 1;\nmissing();\n</script>");
         var report = await Run(page);
-        var finding = Assert.Single(report.Findings);
+        var finding = Assert.Single(report.Findings, f => f.Kind == FindingKinds.Uncaught);
         Assert.Equal(FindingKinds.Uncaught, finding.Kind);
         Assert.Equal(Phase.Load, finding.Phase);
         Assert.Equal(Severity.Block, finding.Severity);
         Assert.Equal(5, (int)finding.Fields["line"]!);
         Assert.Contains("missing is not defined", finding.Text, StringComparison.Ordinal);
+        // The static rules read the same file and name the call; both halves report what they saw.
+        var call = Assert.Single(report.Findings, f => f.Kind == FindingKinds.UndefinedCall);
+        Assert.Equal(5, (int)call.Fields["line"]!);
+        Assert.Equal(FindingKinds.UndefinedCall, report.Findings[0].Kind);
+        Assert.True((bool)report.ToJson()["context"]!["static"]!);
     }
 
     [Fact]
@@ -82,7 +96,8 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         var page = _site.Page("index.html",
             "<!doctype html><script>fetch('https://example.com/data.json').catch(() => {});</script>");
         var report = await Run(page);
-        var finding = Assert.Single(report.Findings);
+        Assert.Equal("fetch", Assert.Single(report.Findings, f => f.Kind == FindingKinds.OutsideReference).Fields["rule"]!.ToString());
+        var finding = Assert.Single(report.Findings, f => f.Kind != FindingKinds.OutsideReference);
         Assert.Equal(FindingKinds.Blocked, finding.Kind);
         Assert.Equal("example.com", finding.Fields["host"]!.ToString());
     }
@@ -98,8 +113,10 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
             </script>
             """);
         var report = await Run(page);
-        var finding = Assert.Single(report.Findings);
+        var finding = Assert.Single(report.Findings, f => f.Kind != FindingKinds.ReadBeforeSet);
         Assert.Equal(FindingKinds.ErrorOnScreen, finding.Kind);
+        var early = Assert.Single(report.Findings, f => f.Kind == FindingKinds.ReadBeforeSet);
+        Assert.Equal("x", early.Fields["name"]!.ToString());
         Assert.Equal("#status", finding.Fields["selector"]!.ToString());
         Assert.Contains("before initialization", finding.Fields["text"]!.ToString(), StringComparison.Ordinal);
     }
@@ -142,8 +159,11 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         const string injected = "<script>/* a serving origin's own script */</script>\n<meta name=\"x\">\n";
         var page = _site.Page("index.html", injected + "<!doctype html>\n<script>\nmissing();\n</script>");
         var report = await Run(page, new AssayOptions { PageLineOffset = 2 });
-        var finding = Assert.Single(report.Findings);
+        var finding = Assert.Single(report.Findings, f => f.Kind == FindingKinds.Uncaught);
         Assert.Equal(3, (int)finding.Fields["line"]!);
         Assert.False(finding.Fields.ContainsKey("injected"));
+        // The static rules read the page's own file too: the origin's script in front of it is not theirs to judge.
+        Assert.Equal(3, (int)Assert.Single(report.Findings, f => f.Kind == FindingKinds.UndefinedCall).Fields["line"]!);
+        Assert.Equal(2, report.Findings.Count);
     }
 }
