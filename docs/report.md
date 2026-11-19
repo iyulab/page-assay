@@ -50,11 +50,11 @@ Every finding has a `kind` and the fields that kind needs. Fields absent from a 
 | `kind` | Default severity | When | Fields |
 |---|---|---|---|
 | `syntax` | block | An inline script or event-handler attribute does not parse. External `src` scripts and blocks whose `type` is not JavaScript are not read; a `type="module"` script parses as a module. | `source` (`script N` — the N-th `<script>` element of the page — or `onclick attribute of <selector>`), `line`, `column`, `message` (the parser's, without a position), `hides`? (see below) |
-| `undefined-call` | block | A name is called (`f()`, `new F()`) but defined nowhere the call can reach — an `onclick="save()"` with no `save` (`reason`: `undefined`), or a call to a name that exists only where the call cannot reach it: inside a function, or at a module script's top level, while a handler attribute or another script calls it as a global (`not-global`). | `name`, `reason`, `line`, `column` |
+| `undefined-name` | block | A name is used — called (`f()`, `new F()`) or read as a value (`button.onclick = downloadCsv`, `show(rows)`) — but defined nowhere the use can reach; the use throws a ReferenceError. An `onclick="save()"` with no `save` (`reason`: `undefined`), or a name that exists only where the use cannot reach it: inside a function, or at a module script's top level, while a handler attribute or another script uses it as a global (`not-global`). A write (`x = 1` makes a global) and `typeof x` are not uses; a value read of a name the markup gives (an element id, a `name` attribute) or of `arguments` finds a value and is not reported. One name is one finding, at its first use. | `name`, `use` (`call` or `read`), `reason`, `line`, `column` |
 | `missing-id` | block | Code looks an element up by an id the markup does not have and the code never gives an element (`document.getElementById("x")`, `document.querySelector("#x …")`, `document.querySelectorAll("#x …")`, with a literal). | `id`, `line`, `column` (of the literal) |
 | `duplicate-id` | notice | Two or more elements in the markup carry the same id. | `id`, `count`, `lines` (each element's line, in document order) |
 | `outside-reference` | block | Code or markup would reach another host, which a page meant to run without the network cannot. **One finding per host per rule** (seventeen images from one host are one finding, at the first). | `rule`, `url`, `code`, `line`, `column` — see «Outside references» |
-| `read-before-set` | block | The page reads a name while it starts, before the line that gives it a value — a function called at the top of a script that reads a `const` declared below the call. Under `let`/`const`/`class` (or a name a later script declares) the read throws; under `var` it reads `undefined`. A `try` around it does not hide it: the page then runs without what the code meant to set up. | `name`, `call`? (the call made by the starting code that led to the read; absent when the starting code read the name itself), `line`, `column` (the read), `setAt` (the line that gives it a value), `throws` |
+| `read-before-set` | block | The page reads a name while it starts, before the line that gives it a value, and that throws — a function called at the top of a script that reads a `const` declared below the call. Under `let`/`const`/`class` (or a name a later script declares) the read throws a ReferenceError; under `var` the name is `undefined`, which throws a TypeError only where it is called, constructed or has a member read — a plain value read (`clearTimeout(timer)`) is harmless and not reported. A `try` around it does not hide it: the page then runs without what the code meant to set up. | `name`, `call`? (the call made by the starting code that led to the read; absent when the starting code read the name itself), `line`, `column` (the read), `setAt` (the line that gives it a value), `error` (`ReferenceError` or `TypeError` — what the browser throws) |
 | `uncaught` | block | The page's own code threw and nothing caught it. | `message`, `file`? (when not the page itself), `line`, `column`, `phase` |
 | `rejection` | block | A promise the page made was rejected and nothing handled it. | `message`, `line`?, `column`?, `phase` |
 | `console-error` | notice | The page reported an error itself with `console.error`. | `message`, `phase` |
@@ -70,7 +70,7 @@ Every finding has a `kind` and the fields that kind needs. Fields absent from a 
 | `interaction` | block | A caller's step did not have its expected effect. | `step` (the step's index), `expected`, `observed` |
 
 A broken script is reported **once, as its cause**: when a script does not parse, the names it would have defined are not also
-reported as `undefined-call` — one `syntax` finding, not seventeen calls to functions that "do not exist". The suppressed findings
+reported as `undefined-name` — one `syntax` finding, not seventeen calls to functions that "do not exist". The suppressed findings
 are counted in the cause's `hides` field.
 
 ### The static rules
@@ -85,7 +85,7 @@ and every `on…` attribute. A script with a `src` is not read, and a `<template
   (`tools/browser-names.html`). Element ids are not assumed to be globals.
 - **Handler attributes** run as functions whose scope reaches, before the globals, their element, its form and the document: a
   handler may call `submit()`, `focus()` or `getElementById(…)` unqualified, and may `return`.
-- **What turns `undefined-call` off.** A page that loads a script from a file — a `src`, or a module an inline module imports — (its
+- **What turns `undefined-name` off.** A page that loads a script from a file — a `src`, or a module an inline module imports — (its
   names are unknown), and code that uses `eval` or `with` (what a name refers to cannot be read from the source), are not checked
   for it; a name the page tests with `typeof` or reads as `window.x` is one it knows may be missing, and is not reported. The
   handler scope is the union of what common elements, a form and the document offer, so a handler is never faulted for a name
@@ -101,12 +101,15 @@ and every `on…` attribute. A script with a `src` is not read, and a `<template
   functions run at once (an IIFE, `f.call(…)`) and calls to a function whose value the source states (a declaration, or
   `const f = () => …` once it is set) are followed. What is **not** followed, so as never to report a read that does not happen:
   callbacks handed to other code (timers, other events, array methods), an async function past its first `await`, generator
-  bodies, the branches of a condition that tests `typeof` or `document.readyState` (an inline script always runs while the
-  document loads, so «wait if loading, else run now» never runs now); and a `var` read by its own initializer (`var x = x || {}`) or never
-  given a value at all is not reported. Both branches of any other condition are followed.
+  bodies, a `catch` block (it runs only when its `try` fails), the branches of a condition that tests `typeof` or
+  `document.readyState` (an inline script always runs while the document loads, so «wait if loading, else run now» never runs
+  now); and a `var` read by its own initializer (`var x = x || {}`) or never given a value at all is not reported. Both branches of
+  any other condition are followed, and a throw on one does not hide the other. **A read that throws ends its path**, as in the
+  page: the rest of the function and its callers up to the nearest `try` (or the end of the script) do not run, so one defect is
+  one finding — a second read after it is never reached.
 
 A broken script is reported **once, as its cause**: when a script does not parse, the names it would have defined are not also
-reported as `undefined-call` — one `syntax` finding, not seventeen calls to functions that "do not exist". The names it would
+reported as `undefined-name` — one `syntax` finding, not seventeen calls to functions that "do not exist". The names it would
 have defined are read from its text (`function f`, `class C`, `var`/`let`/`const x`, `window.x =`), and the suppressed findings
 are counted in the cause's `hides` field (absent when none).
 
@@ -135,7 +138,7 @@ run that is not told the origin the page will be served on counts every absolute
 
 A driven run reports the same request again when the page makes it (`blocked`): the static finding says the source asks for it,
 the driven one that the request was made and refused. The two are not merged — nor are a `syntax` finding and the driven
-`uncaught` SyntaxError of the same script, or an `undefined-call` and the ReferenceError it throws in use.
+`uncaught` SyntaxError of the same script, or an `undefined-name` and the ReferenceError it throws in use.
 
 Shared fields:
 
@@ -177,7 +180,7 @@ The static kinds:
 | `kind` | Key |
 |---|---|
 | `syntax` | the script's content (a hash of its text), or the handler attribute: its element's id, else its label (`aria-label`, `title` or its text), else — only when it has neither — its selector, plus the event (`onclick`) |
-| `undefined-call` | the name and the reason, plus the handler attribute (as above) when a handler makes the call |
+| `undefined-name` | the name and the reason, plus the handler attribute (as above) when a handler uses it |
 | `missing-id`, `duplicate-id` | the id |
 | `outside-reference` | the rule and the host (not the URL: a different first image from the same host is the same finding) |
 | `read-before-set` | the call and the name |

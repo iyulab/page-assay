@@ -55,7 +55,7 @@ internal static partial class StaticRules
         }
 
         var model = new ScopeModel(units);
-        var hidden = UndefinedCalls(page, model, drafts, broken);
+        var hidden = UndefinedNames(page, model, drafts, broken);
         foreach (var (syntax, _) in broken)
             if (hidden.GetValueOrDefault(syntax) is var count and > 0)
                 syntax.Fields["hides"] = count;
@@ -85,14 +85,17 @@ internal static partial class StaticRules
 
     private static string HandlerAnchor(HandlerAttribute handler) => $"handler:{handler.Anchor}:{handler.Event}";
 
-    // Names a script that does not parse would have defined, read from its text: calls to them are effects of the parse failure.
+    // Names a script that does not parse would have defined, read from its text: uses of them are effects of the parse failure.
     private static HashSet<string> WouldDefine(string code) =>
         new(Definitions().Matches(code).Select(m => m.Groups.Values.Skip(1).First(g => g.Success).Value), StringComparer.Ordinal);
 
     [GeneratedRegex(@"\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)|\bclass\s+([A-Za-z_$][\w$]*)|\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)|\b(?:window|globalThis|self)\.([A-Za-z_$][\w$]*)\s*=(?!=)")]
     private static partial Regex Definitions();
 
-    private static Dictionary<Draft, int> UndefinedCalls(PageSource page, ScopeModel model, List<Draft> drafts,
+    // A name the code uses — calls, or reads as a value (an onclick = save, a value passed on) — that nothing defines: the use throws a
+    // ReferenceError. A write (x = 1 makes a global) and typeof are not uses that throw. A read of a name the markup gives (an
+    // element id, a name attribute) or of a function's own `arguments` finds a value; a call of one is still reported.
+    private static Dictionary<Draft, int> UndefinedNames(PageSource page, ScopeModel model, List<Draft> drafts,
         List<(Draft Syntax, HashSet<string> Names)> broken)
     {
         var hidden = new Dictionary<Draft, int>();
@@ -106,10 +109,12 @@ internal static partial class StaticRules
         var counted = new HashSet<string>(StringComparer.Ordinal);
         foreach (var reference in model.References)
         {
-            if ((reference.Use & ReferenceUse.Call) == 0 || reference.Binding is not null) continue;
+            if ((reference.Use & (ReferenceUse.Call | ReferenceUse.Read)) == 0 || reference.Binding is not null) continue;
             var name = reference.Node.Name;
+            var call = (reference.Use & ReferenceUse.Call) != 0;
             if (BrowserGlobals.Contains(name) || model.AssignedGlobals.Contains(name) || model.TypeOfNames.Contains(name)
-                || (reference.Unit.Handler is not null && HandlerScope.Contains(name)))
+                || (reference.Unit.Handler is not null && HandlerScope.Contains(name))
+                || (!call && (page.MarkupNames.Contains(name) || name == "arguments")))
                 continue;
             var anchor = reference.Unit.Handler is { } handler ? HandlerAnchor(handler) : null;
             var reason = declared.Contains(name) ? "not-global" : "undefined";
@@ -119,8 +124,9 @@ internal static partial class StaticRules
                 continue;
             }
             var at = At(page, reference.Unit, reference.Node);
-            drafts.Add(new Draft(FindingKinds.UndefinedCall,
-                Fields(("name", name), ("reason", reason), ("line", at.Line), ("column", at.Column)), anchor, at));
+            var use = call ? "call" : "read";
+            drafts.Add(new Draft(FindingKinds.UndefinedName,
+                Fields(("name", name), ("use", use), ("reason", reason), ("line", at.Line), ("column", at.Column)), anchor, at));
         }
         return hidden;
     }
@@ -225,7 +231,7 @@ internal static partial class StaticRules
             var at = At(page, read.Unit, read.Read);
             var set = read.Binding.SetAt!.Value;
             var fields = Fields(("name", read.Binding.Name), ("call", read.Call), ("line", at.Line), ("column", at.Column),
-                ("setAt", At(page, set.Unit, set.Node).Line), ("throws", read.Throws));
+                ("setAt", At(page, set.Unit, set.Node).Line), ("error", read.Error));
             drafts.Add(new Draft(FindingKinds.ReadBeforeSet, fields, null, at));
         }
     }

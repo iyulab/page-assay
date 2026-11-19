@@ -112,18 +112,18 @@ public sealed class StaticTests
         var syntax = Assert.Single(Of(report, FindingKinds.Syntax));
         Assert.Equal(3, Int(syntax, "hides")); // save() and restore() from the handlers, save() from the script
         Assert.Contains("3 call(s) to names it would define", syntax.Text, StringComparison.Ordinal);
-        var call = Assert.Single(Of(report, FindingKinds.UndefinedCall));
+        var call = Assert.Single(Of(report, FindingKinds.UndefinedName));
         Assert.Equal("never", Str(call, "name"));
     }
 
-    // ---- undefined-call ----
+    // ---- undefined-name ----
 
     [Fact]
     public void A_name_called_but_defined_nowhere_is_undefined()
     {
         var report = Run("<!doctype html>\n<button onclick=\"savee()\">Save</button>\n<script>function save() {}</script>");
         var finding = Assert.Single(report.Findings);
-        Assert.Equal(FindingKinds.UndefinedCall, finding.Kind);
+        Assert.Equal(FindingKinds.UndefinedName, finding.Kind);
         Assert.Equal("savee", Str(finding, "name"));
         Assert.Equal("undefined", Str(finding, "reason"));
         Assert.Equal(2, Int(finding, "line"));
@@ -145,7 +145,7 @@ public sealed class StaticTests
             """);
         var finding = Assert.Single(report.Findings);
         Assert.Equal("not-global", Str(finding, "reason"));
-        Assert.Equal("undefined-call:addItem|not-global|handler:#add:onclick", finding.Key);
+        Assert.Equal("undefined-name:addItem|not-global|handler:#add:onclick", finding.Key);
     }
 
     [Fact]
@@ -164,18 +164,38 @@ public sealed class StaticTests
     public void Globals_come_from_any_classic_script_window_assignments_and_browser_names()
     {
         var report = Run("""
-            <button onclick="a(); b(); c(); d(); alert('x'); fetchLater2 && 1">x</button>
+            <button onclick="a(); b(); c(); d(); alert('x'); onclick = a; navigator.clipboard">x</button>
             <script>const a = () => {};</script>
             <script>window.b = function () {}; globalThis['c'] = () => {}; d = () => {};</script>
             """);
-        Assert.Empty(Of(report, FindingKinds.UndefinedCall));
+        Assert.Empty(Of(report, FindingKinds.UndefinedName));
     }
 
     [Fact]
     public void A_name_the_page_tests_with_typeof_or_a_page_that_loads_script_files_is_not_reported()
     {
         Assert.Empty(Run("<script>if (typeof maybe === 'function') maybe();</script>").Findings);
-        Assert.Empty(Of(Run("<script src=\"lib.js\"></script><script>fromLibrary();</script>"), FindingKinds.UndefinedCall));
+        Assert.Empty(Of(Run("<script src=\"lib.js\"></script><script>fromLibrary();</script>"), FindingKinds.UndefinedName));
+    }
+
+    [Fact]
+    public void A_name_handed_over_without_a_call_and_defined_nowhere_is_undefined()
+    {
+        // The page throws a ReferenceError at load as surely as with a call.
+        var report = Run("<button id=\"csv\">CSV</button>\n<script>document.getElementById('csv').onclick = downloadCsv;</script>");
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal(FindingKinds.UndefinedName, finding.Kind);
+        Assert.Equal("downloadCsv", Str(finding, "name"));
+        Assert.Equal("read", Str(finding, "use"));
+        Assert.Equal("downloadCsv is used at line 2, column 50, but nothing defines it.", finding.Text);
+    }
+
+    [Fact]
+    public void A_name_a_script_writes_is_a_global_and_one_name_used_twice_is_one_finding()
+    {
+        Assert.Empty(Run("<script>total = 0; total += 1; console.log(total);</script>").Findings);
+        var finding = Assert.Single(Run("<script>show(rows); render(rows);</script>").Findings, f => Str(f, "name") == "rows");
+        Assert.Equal("read", Str(finding, "use"));
     }
 
     [Fact]
@@ -364,18 +384,83 @@ public sealed class StaticTests
         Assert.Equal("init", Str(finding, "call"));
         Assert.Equal(6, Int(finding, "line"));
         Assert.Equal(4, Int(finding, "setAt"));
-        Assert.True((bool)finding.Fields["throws"]!);
+        Assert.Equal("ReferenceError", Str(finding, "error"));
         Assert.Equal("read-before-set:init|items", finding.Key);
-        Assert.Equal("While init() runs at start, items is read at line 6, column 28 before line 4 gives it a value: the read throws.", finding.Text);
+        Assert.Equal("While init() runs at start, items is read at line 6, column 28 before line 4 gives it a value: the read throws a ReferenceError.", finding.Text);
     }
 
     [Fact]
-    public void Under_var_the_read_is_undefined_not_a_throw()
+    public void Under_var_a_member_read_of_the_undefined_value_throws_a_type_error()
     {
         var report = Run("<script>\nshow();\nvar title = 'x';\nfunction show() { return title.length; }\n</script>");
         var finding = Assert.Single(report.Findings);
-        Assert.False((bool)finding.Fields["throws"]!);
-        Assert.EndsWith("it is undefined there.", finding.Text, StringComparison.Ordinal);
+        Assert.Equal("TypeError", Str(finding, "error"));
+        Assert.EndsWith("it is still undefined there, and using it throws a TypeError.", finding.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Under_var_a_call_or_new_throws_but_a_value_read_is_harmless()
+    {
+        Assert.Equal("TypeError", Str(Assert.Single(Run("<script>\nboot();\nvar boot = function () {};\n</script>").Findings), "error"));
+        Assert.Single(Run("<script>\nconst w = new Widget();\nvar Widget = class {};\n</script>").Findings);
+        // clearTimeout(undefined) does nothing: the page works.
+        Assert.Empty(Run("<script>\nreset();\nfunction reset() { clearTimeout(timer); }\nvar timer = null;\n</script>").Findings);
+    }
+
+    [Fact]
+    public void A_read_in_a_catch_block_is_not_followed_at_start()
+    {
+        // The catch runs only when the try fails — here it does not, and the page works.
+        Assert.Empty(Run("""
+            <script>
+            save();
+            function save() { try { localStorage.setItem('k', '1'); } catch (e) { toast.show(); } }
+            const toast = { show() {} };
+            </script>
+            """).Findings);
+    }
+
+    [Fact]
+    public void A_read_that_throws_ends_its_path_so_one_defect_is_one_finding()
+    {
+        // win.localStorage throws first; memory after it is never reached.
+        var report = Run("""
+            <script>
+            (function () {
+              const store = typeof win.localStorage === 'object' ? memory : null;
+              let win = window;
+              let memory = {};
+            })();
+            </script>
+            """);
+        Assert.Equal("win", Str(Assert.Single(report.Findings), "name"));
+    }
+
+    [Fact]
+    public void A_throw_on_one_branch_of_a_condition_does_not_hide_the_other()
+    {
+        var report = Run("""
+            <script>
+            if (location.hash) a.x(); else b.y();
+            let a = {}, b = {};
+            </script>
+            """);
+        Assert.Equal(["a", "b"], report.Findings.Select(f => Str(f, "name")).Order().ToArray());
+    }
+
+    [Fact]
+    public void A_caught_throw_lets_the_code_after_the_try_run()
+    {
+        var report = Run("""
+            <script>
+            try { first(); } catch (e) {}
+            second();
+            const one = 1, two = 2;
+            function first() { return one; }
+            function second() { return two; }
+            </script>
+            """);
+        Assert.Equal(["one", "two"], report.Findings.Select(f => Str(f, "name")).Order().ToArray());
     }
 
     [Fact]
@@ -386,7 +471,7 @@ public sealed class StaticTests
         var finding = Assert.Single(report.Findings);
         Assert.Equal("x", Str(finding, "name"));
         Assert.Equal("use", Str(finding, "call"));
-        Assert.True((bool)finding.Fields["throws"]!);
+        Assert.Equal("ReferenceError", Str(finding, "error"));
     }
 
     [Fact]
@@ -431,7 +516,7 @@ public sealed class StaticTests
         Assert.Equal("boot", Str(finding, "name"));
         Assert.False(finding.Fields.ContainsKey("call"));
         Assert.Equal(5, Int(finding, "setAt"));
-        Assert.True((bool)finding.Fields["throws"]!);
+        Assert.Equal("ReferenceError", Str(finding, "error"));
     }
 
     [Fact]
@@ -443,7 +528,7 @@ public sealed class StaticTests
             const data = [1, 2];
             later();
             setTimeout(() => more.push(1), 0);           // a callback runs later
-            button?.addEventListener?.('click', () => more.push(2));
+            document.querySelector('button')?.addEventListener('click', () => more.push(2));
             const more = [];
             var cache = cache || {};                      // a var reading itself on purpose
             if (typeof settings !== 'undefined') use(settings);
@@ -492,7 +577,7 @@ public sealed class StaticTests
         Assert.Equal("script 1", Str(before.Findings[0], "source"));
         Assert.Equal("script 2", Str(after.Findings[0], "source"));
         Assert.StartsWith("syntax:script:", before.Findings[0].Key, StringComparison.Ordinal);
-        Assert.Contains("undefined-call:nope|undefined|handler:button \"x\":onclick", before.Findings.Select(f => f.Key));
+        Assert.Contains("undefined-name:nope|undefined|handler:button \"x\":onclick", before.Findings.Select(f => f.Key));
     }
 
     [Fact]
@@ -525,7 +610,7 @@ public sealed class StaticTests
         {
             Severities = new Dictionary<string, Severity> { [FindingKinds.DuplicateId] = Severity.Block },
         });
-        Assert.Equal(3, Of(report, FindingKinds.UndefinedCall).Count);
+        Assert.Equal(3, Of(report, FindingKinds.UndefinedName).Count);
         Assert.Equal(2, Int(Assert.Single(report.Findings, f => f.Kind == FindingKinds.More), "count"));
         Assert.Equal(Severity.Block, Assert.Single(Of(report, FindingKinds.DuplicateId)).Severity);
     }
@@ -536,12 +621,9 @@ public sealed class StaticTests
         var json = Run("<script>init();\nlet n = 1;\nfunction init() { return n; }</script>").Findings[0].ToJson();
         Assert.Equal("read-before-set", json["kind"]!.ToString());
         Assert.Equal("init", json["call"]!.ToString());
-        Assert.Equal(JsonValueKind(true), json["throws"]!.GetValueKind());
+        Assert.Equal("ReferenceError", json["error"]!.ToString());
         Assert.DoesNotContain(json, p => p.Value is null);
     }
-
-    private static System.Text.Json.JsonValueKind JsonValueKind(bool value) =>
-        value ? System.Text.Json.JsonValueKind.True : System.Text.Json.JsonValueKind.False;
 }
 
 public sealed class StaticRobustnessTests

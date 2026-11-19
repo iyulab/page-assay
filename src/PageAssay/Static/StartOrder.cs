@@ -3,18 +3,23 @@ using Acornima.Ast;
 
 namespace PageAssay.Static;
 
-/// <summary>A name read while the page starts, before the code that gives it a value has run. <c>Call</c> is the call made by the
-/// starting code that led to the read (null when the starting code read it itself); <c>Throws</c> is true when the read throws
-/// (<c>let</c>, <c>const</c>, <c>class</c>, or a name a later script declares), false when it gives <c>undefined</c> (a <c>var</c>).</summary>
-internal sealed record EarlyRead(Binding Binding, Identifier Read, CodeUnit Unit, string? Call, bool Throws);
+/// <summary>A name read while the page starts, before the code that gives it a value has run, where that throws. <c>Call</c> is
+/// the call made by the starting code that led to the read (null when the starting code read it itself); <c>Error</c> is what the
+/// browser throws: <c>ReferenceError</c> for <c>let</c>, <c>const</c>, <c>class</c> or a name a later script declares,
+/// <c>TypeError</c> for a <c>var</c> still <c>undefined</c> that is called, constructed or has a member read.</summary>
+internal sealed record EarlyRead(Binding Binding, Identifier Read, CodeUnit Unit, string? Call, string Error);
 
 /// <summary>
 /// Follows the code a page runs while it starts, in order, and notes every name read before it has a value. What it follows: the top
 /// level of classic scripts in document order, then module scripts, then the <c>DOMContentLoaded</c> / <c>load</c> listeners and a
 /// <c>&lt;body onload&gt;</c> handler registered by then; functions run at once (an IIFE) and calls to functions whose value the
 /// source states. What it does not follow, so as never to report a read that does not happen: callbacks handed to other code
-/// (timers, other events, array methods), an async function past its first <c>await</c>, generator bodies, and the branches of a
-/// condition that tests <c>typeof</c> or <c>document.readyState</c>. Both branches of other conditions are followed.
+/// (timers, other events, array methods), an async function past its first <c>await</c>, generator bodies, a <c>catch</c> block
+/// (it runs only when its <c>try</c> fails), and the branches of a condition that tests <c>typeof</c> or <c>document.readyState</c>.
+/// Both branches of other conditions are followed. A read that throws ends its path, as it does in the page: the rest of the
+/// function and its callers up to the nearest <c>try</c> (or the end of the script) do not run, so one defect is one finding.
+/// A <c>var</c> read before its value is reported only where using <c>undefined</c> throws — called, constructed, or a member
+/// read; a plain value read (<c>clearTimeout(timer)</c>) throws nothing and stays quiet.
 /// </summary>
 internal sealed class StartOrder
 {
@@ -35,6 +40,7 @@ internal sealed class StartOrder
     private string? _call;
     private bool _async;
     private bool _stopped;
+    private bool _threw;
 
     private StartOrder(ScopeModel model) => _model = model;
 
@@ -61,8 +67,11 @@ internal sealed class StartOrder
             order.Enter(scope);
             order.RunProgram(unit, scope, async: false);
         }
-        for (var i = 0; i < order._deferred.Count; i++) // a listener may register another
+        for (var i = 0; i < order._deferred.Count; i++) // a listener may register another; one that throws stops only itself
+        {
+            (order._stopped, order._threw) = (false, false);
             order.Invoke(order._deferred[i].Function, order._deferred[i].Name);
+        }
         return order.Found;
     }
 
@@ -70,6 +79,7 @@ internal sealed class StartOrder
     {
         _async = async;
         _stopped = false;
+        _threw = false;
         _call = null;
         if (unit.Ast is Acornima.Ast.Program program) RunList(program.Body, scope);
     }
@@ -122,11 +132,7 @@ internal sealed class StartOrder
                 return false;
             case IfStatement i:
                 Eval(i.Test, scope);
-                if (!Guarded(i.Test))
-                {
-                    Run(i.Consequent, scope);
-                    Run(i.Alternate, scope);
-                }
+                if (!Guarded(i.Test)) Branches(() => Run(i.Consequent, scope), () => Run(i.Alternate, scope));
                 return false;
             case StaticBlock:
                 return false;
@@ -163,15 +169,15 @@ internal sealed class StartOrder
                 Eval(d.Test, scope);
                 return false;
             case TryStatement t:
+            {
+                var outer = _stopped;
                 Run(t.Block, scope);
-                if (t.Handler is { } handler)
-                {
-                    var inner = _model.ScopeOf(handler);
-                    Enter(inner);
-                    Run(handler.Body, inner);
-                }
+                // A throw inside is caught here: what follows the try runs. The catch block itself is not followed — it runs only
+                // when the try fails, and a read in it is no more certain at start than one in a handler or a timer.
+                if (_threw) (_stopped, _threw) = (outer, false);
                 Run(t.Finalizer, scope);
                 return false;
+            }
             case SwitchStatement s:
             {
                 Eval(s.Discriminant, scope);
@@ -269,7 +275,7 @@ internal sealed class StartOrder
         switch (node)
         {
             case Identifier id:
-                Read(id);
+                Read(id, asObject: false);
                 return;
             case UnaryExpression { Operator: Operator.TypeOf, Argument: Identifier }:
             case FunctionExpression or ArrowFunctionExpression or ClassExpression:
@@ -282,27 +288,23 @@ internal sealed class StartOrder
                 EvalCall(c, scope);
                 return;
             case NewExpression n:
-                Eval(n.Callee, scope);
+                EvalObject(n.Callee, scope);
                 foreach (var argument in n.Arguments) Eval(argument, scope);
                 return;
             case LogicalExpression l:
                 Eval(l.Left, scope);
-                if (!Guarded(l.Left)) Eval(l.Right, scope);
+                if (!Guarded(l.Left)) Branches(() => Eval(l.Right, scope), () => { });
                 return;
             case ConditionalExpression c:
                 Eval(c.Test, scope);
-                if (!Guarded(c.Test))
-                {
-                    Eval(c.Consequent, scope);
-                    Eval(c.Alternate, scope);
-                }
+                if (!Guarded(c.Test)) Branches(() => Eval(c.Consequent, scope), () => Eval(c.Alternate, scope));
                 return;
             case AwaitExpression a:
                 Eval(a.Argument, scope);
                 if (_async) _stopped = true; // the rest runs later, when the awaited value arrives
                 return;
             case MemberExpression m:
-                Eval(m.Object, scope);
+                EvalObject(m.Object, scope);
                 if (m.Computed) Eval(m.Property, scope);
                 return;
             case Property p:
@@ -317,10 +319,10 @@ internal sealed class StartOrder
 
     private void Assign(AssignmentExpression a, Scope scope)
     {
-        if (a.Operator != Operator.Assignment && a.Left is Identifier read) Read(read);
+        if (a.Operator != Operator.Assignment && a.Left is Identifier read) Read(read, asObject: false);
         if (a.Left is MemberExpression target)
         {
-            Eval(target.Object, scope);
+            EvalObject(target.Object, scope);
             if (target.Computed) Eval(target.Property, scope);
         }
         Eval(a.Right, scope);
@@ -342,7 +344,7 @@ internal sealed class StartOrder
         {
             case Identifier id:
             {
-                var ready = Read(id);
+                var ready = Read(id, asObject: true);
                 foreach (var argument in c.Arguments) Eval(argument, scope);
                 if (ready && _model.ReferenceOf(id)?.Binding?.Function is { } function) Invoke(function, id.Name);
                 return;
@@ -353,7 +355,7 @@ internal sealed class StartOrder
                 return;
             case MemberExpression m:
             {
-                Eval(m.Object, scope);
+                EvalObject(m.Object, scope);
                 if (m.Computed) Eval(m.Property, scope);
                 foreach (var argument in c.Arguments) Eval(argument, scope);
                 if (m is { Computed: false, Property: Identifier { Name: "addEventListener" }, Object: Identifier { Name: "document" or "window" } host }
@@ -371,6 +373,27 @@ internal sealed class StartOrder
                 foreach (var argument in c.Arguments) Eval(argument, scope);
                 return;
         }
+    }
+
+    // Two ways a condition may go, both followed: a throw on one does not hide the other, and the code after the condition stops
+    // only when both ways throw — or when either awaits (what follows may run later, so it is not followed).
+    private void Branches(Action first, Action second)
+    {
+        if (_stopped) return;
+        first();
+        var (stopped1, threw1) = (_stopped, _threw);
+        (_stopped, _threw) = (false, false);
+        second();
+        var awaited = (stopped1 && !threw1) || (_stopped && !_threw);
+        var bothThrew = threw1 && _threw;
+        (_stopped, _threw) = (awaited || bothThrew, bothThrew && !awaited);
+    }
+
+    // An expression whose value is used as an object — called, constructed, or a member read: an undefined var there throws.
+    private void EvalObject(Node node, Scope scope)
+    {
+        if (Unwrap(node) is Identifier id) { if (!_stopped) Read(id, asObject: true); }
+        else Eval(node, scope);
     }
 
     // The function an expression stands for, when the source says so: a function written in place, or a name holding one.
@@ -396,19 +419,21 @@ internal sealed class StartOrder
         Enter(scope);
         if (function.Body is FunctionBody body) RunList(body.Body, scope);
         else Eval(function.Body, scope);
-        (_call, _async, _stopped) = (call, async, stopped); // an async function's await pauses it, not its caller
+        // An async function's await pauses it, not its caller; its throw rejects a promise rather than reaching the caller.
+        var threw = _threw && !function.Async;
+        (_call, _async, _stopped, _threw) = (call, async, stopped || threw, threw);
         _active.Remove(node);
     }
 
     /// <returns>True when the name has its value (a call through it can be followed).</returns>
-    private bool Read(Identifier id)
+    private bool Read(Identifier id, bool asObject)
     {
         if (_model.ReferenceOf(id) is not { Binding: { } binding } reference) return true;
         if (!_state.TryGetValue(binding, out var state))
         {
             if (binding.Scope.Kind != ScopeKind.Global || binding.Kind == BindingKind.BlockFunction) return true;
             // A name a later script declares: not there at all yet.
-            Report(binding, id, reference.Unit, throws: true);
+            Report(binding, id, reference.Unit, "ReferenceError");
             return false;
         }
         switch (state)
@@ -416,19 +441,22 @@ internal sealed class StartOrder
             case State.Set:
                 return true;
             case State.Dead:
-                Report(binding, id, reference.Unit, throws: true);
+                Report(binding, id, reference.Unit, "ReferenceError");
                 return false;
             default:
-                // var x = x || {} reads x on purpose; a var nothing ever assigns is meant to be undefined.
-                if (!_initializing.Contains(binding) && binding.SetAt is not null) Report(binding, id, reference.Unit, throws: false);
+                // var x = x || {} reads x on purpose; a var nothing ever assigns is meant to be undefined; a value read of undefined
+                // (clearTimeout(timer)) throws nothing.
+                if (asObject && !_initializing.Contains(binding) && binding.SetAt is not null)
+                    Report(binding, id, reference.Unit, "TypeError");
                 return false;
         }
     }
 
-    private void Report(Binding binding, Identifier id, CodeUnit unit, bool throws)
+    private void Report(Binding binding, Identifier id, CodeUnit unit, string error)
     {
         if (binding.SetAt is null) return;
-        Found.Add(new EarlyRead(binding, id, unit, _call == binding.Name ? null : _call, throws));
+        Found.Add(new EarlyRead(binding, id, unit, _call == binding.Name ? null : _call, error));
+        (_stopped, _threw) = (true, true); // the page stops here too
     }
 
     // A condition whose outcome the page decides at run time on purpose: it tests typeof, or document.readyState (an inline

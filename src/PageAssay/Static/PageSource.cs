@@ -65,6 +65,10 @@ internal sealed class PageSource
     /// <summary>Ids inside a <c>&lt;template&gt;</c>: not in the document, but there once the code clones the template in.</summary>
     public HashSet<string> TemplateIds { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Names the markup itself makes reachable from code: every element id (the window's named properties) and every
+    /// <c>name</c> attribute (a form's controls inside its handlers, and a named form, image or frame on the window).</summary>
+    public HashSet<string> MarkupNames { get; } = new(StringComparer.Ordinal);
+
     /// <summary>The page loads a script from a file, which the static rules do not read: the names it defines are unknown.</summary>
     public bool HasScriptFiles { get; private set; }
 
@@ -103,7 +107,12 @@ internal sealed class PageSource
             if (element.LocalName == "style" && tag is not null)
                 page.Styles.Add(new StyleText(element.TextContent, ContentSpan(text, tag, element.TextContent)));
             if (element.Id is { Length: > 0 } id)
+            {
                 page.Ids.Add(new ElementId(id, tag?.Offset ?? 0));
+                page.MarkupNames.Add(id);
+            }
+            if (element.GetAttribute("name") is { Length: > 0 } elementName)
+                page.MarkupNames.Add(elementName);
             foreach (var attribute in element.Attributes)
             {
                 var name = attribute.LocalName;

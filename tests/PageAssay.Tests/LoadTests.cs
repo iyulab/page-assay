@@ -36,14 +36,18 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
     [InlineData("<script>init();\nconst items = [];\nfunction init() { return items.length; }</script>", false, true)]
     [InlineData("<script>if (document.readyState === 'loading') addEventListener('DOMContentLoaded', init); else init();\nconst items = [];\nfunction init() { return items.length; }</script>", false, false)]
     [InlineData("<script>boot();</script><script>function boot() {}</script>", false, true)]
+    [InlineData("<script>boot();\nvar boot = function () {};</script>", false, true)]
+    [InlineData("<script>reset();\nfunction reset() { clearTimeout(timer); }\nvar timer = null;</script>", false, false)]
+    [InlineData("<script>save();\nfunction save() { try { localStorage.setItem('k', '1'); } catch (e) { toast.show(); } }\nconst toast = { show() {} };</script>", false, false)]
     public async Task Static_syntax_and_throwing_reads_agree_with_the_browser(string html, bool broken, bool throws)
     {
         var report = await Run(_site.Page("index.html", "<!doctype html>" + html));
         var uncaught = report.Findings.Where(f => f.Kind == FindingKinds.Uncaught).Select(f => f.Fields["message"]!.ToString()).ToList();
         Assert.Equal(broken, report.Findings.Any(f => f.Kind == FindingKinds.Syntax));
         Assert.Equal(broken, uncaught.Any(m => m.StartsWith("SyntaxError", StringComparison.Ordinal)));
-        Assert.Equal(throws, report.Findings.Any(f => f.Kind == FindingKinds.ReadBeforeSet && (bool)f.Fields["throws"]!));
-        Assert.Equal(throws, uncaught.Any(m => m.StartsWith("ReferenceError", StringComparison.Ordinal)));
+        var read = report.Findings.FirstOrDefault(f => f.Kind == FindingKinds.ReadBeforeSet);
+        Assert.Equal(throws, read is not null);
+        Assert.Equal(throws, uncaught.Any(m => m.StartsWith(read?.Fields["error"]?.ToString() ?? "ReferenceError", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -70,9 +74,9 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         Assert.Equal(5, (int)finding.Fields["line"]!);
         Assert.Contains("missing is not defined", finding.Text, StringComparison.Ordinal);
         // The static rules read the same file and name the call; both halves report what they saw.
-        var call = Assert.Single(report.Findings, f => f.Kind == FindingKinds.UndefinedCall);
+        var call = Assert.Single(report.Findings, f => f.Kind == FindingKinds.UndefinedName);
         Assert.Equal(5, (int)call.Fields["line"]!);
-        Assert.Equal(FindingKinds.UndefinedCall, report.Findings[0].Kind);
+        Assert.Equal(FindingKinds.UndefinedName, report.Findings[0].Kind);
         Assert.True((bool)report.ToJson()["context"]!["static"]!);
     }
 
@@ -182,7 +186,7 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         Assert.Equal(3, (int)finding.Fields["line"]!);
         Assert.False(finding.Fields.ContainsKey("injected"));
         // The static rules read the page's own file too: the origin's script in front of it is not theirs to judge.
-        Assert.Equal(3, (int)Assert.Single(report.Findings, f => f.Kind == FindingKinds.UndefinedCall).Fields["line"]!);
+        Assert.Equal(3, (int)Assert.Single(report.Findings, f => f.Kind == FindingKinds.UndefinedName).Fields["line"]!);
         Assert.Equal(2, report.Findings.Count);
     }
 }

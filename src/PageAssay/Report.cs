@@ -149,15 +149,15 @@ public static class FindingKinds
     public const string TextContrast = "text-contrast";
     /// <summary>A script or event-handler attribute does not parse.</summary>
     public const string Syntax = "syntax";
-    /// <summary>A name is called but defined nowhere the call can reach.</summary>
-    public const string UndefinedCall = "undefined-call";
+    /// <summary>A name is called or read but defined nowhere the use can reach.</summary>
+    public const string UndefinedName = "undefined-name";
     /// <summary>Code looks an element up by an id the markup does not have.</summary>
     public const string MissingId = "missing-id";
     /// <summary>Two or more elements in the markup carry the same id.</summary>
     public const string DuplicateId = "duplicate-id";
     /// <summary>Code or markup would reach another host.</summary>
     public const string OutsideReference = "outside-reference";
-    /// <summary>The page reads a name while it starts, before the line that gives it a value.</summary>
+    /// <summary>The page reads a name while it starts, before the line that gives it a value, and that throws.</summary>
     public const string ReadBeforeSet = "read-before-set";
     /// <summary>A table whose rows do not have as many cells as its header has columns.</summary>
     public const string TableShape = "table-shape";
@@ -204,7 +204,7 @@ public static class FindingKinds
             UnnamedField => f.ContainsKey("nearText") ? "near:" + S("nearText") : S("selector"),
             More => S("of"),
             Syntax => anchor ?? S("source"),
-            UndefinedCall => anchor is null ? $"{S("name")}|{S("reason")}" : $"{S("name")}|{S("reason")}|{anchor}",
+            UndefinedName => anchor is null ? $"{S("name")}|{S("reason")}" : $"{S("name")}|{S("reason")}|{anchor}",
             MissingId or DuplicateId => S("id"),
             OutsideReference => $"{S("rule")}|{anchor ?? S("url")}",
             ReadBeforeSet => $"{S("call")}|{S("name")}",
@@ -242,15 +242,16 @@ public static class FindingKinds
             Syntax => f.ContainsKey("hides")
                 ? $"The {S("source")} does not parse{At()}: {S("message")} ({S("hides")} call(s) to names it would define are not reported apart)."
                 : $"The {S("source")} does not parse{At()}: {S("message")}",
-            UndefinedCall => S("reason") == "not-global"
-                ? $"{S("name")}() is called as a global{At()}, but it exists only inside a function or a module script."
-                : $"{S("name")}() is called{At()}, but nothing defines it.",
+            UndefinedName => (S("use") == "call" ? $"{S("name")}() is called" : $"{S("name")} is used")
+                + (S("reason") == "not-global"
+                    ? $" as a global{At()}, but it exists only inside a function or a module script."
+                    : $"{At()}, but nothing defines it."),
             MissingId => $"The code looks up the id \"{S("id")}\"{At()}, but no element has it.",
             DuplicateId => $"{S("count")} elements have the id \"{S("id")}\" (lines {Lines()}): a lookup finds only the first.",
             OutsideReference => $"{S("url")}{At()} is on another host ({S("rule")}): the page must work without other hosts.",
             ReadBeforeSet => (f.ContainsKey("call") ? $"While {S("call")}() runs at start, " : "At start, ")
                 + $"{S("name")} is read{At()} before line {S("setAt")} gives it a value: "
-                + (S("throws") == "true" ? "the read throws." : "it is undefined there."),
+                + (S("error") == "TypeError" ? "it is still undefined there, and using it throws a TypeError." : "the read throws a ReferenceError."),
             _ => kind,
         };
     }
