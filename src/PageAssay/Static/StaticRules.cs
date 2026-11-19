@@ -96,9 +96,13 @@ internal static partial class StaticRules
         List<(Draft Syntax, HashSet<string> Names)> broken)
     {
         var hidden = new Dictionary<Draft, int>();
-        // A script read from a file, eval or with: what a name refers to cannot be known from the inline source.
-        if (page.HasScriptFiles || model.Dynamic) return hidden;
-        var declared = model.Bindings.Select(b => b.Name).ToHashSet(StringComparer.Ordinal);
+        // A script read from a file (a src, or a module an inline module imports), eval or with: what a name refers to cannot be
+        // known from the inline source.
+        if (page.HasScriptFiles || model.Imports.Count > 0 || model.Dynamic) return hidden;
+        // Exists, but not where the call reaches: a name that can hold the function (a parameter or a catch binding of the same
+        // name somewhere is not that function).
+        var declared = model.Bindings.Where(b => b.Kind is not (BindingKind.Parameter or BindingKind.CatchParameter or BindingKind.SelfName))
+            .Select(b => b.Name).ToHashSet(StringComparer.Ordinal);
         var counted = new HashSet<string>(StringComparer.Ordinal);
         foreach (var reference in model.References)
         {
@@ -137,7 +141,7 @@ internal static partial class StaticRules
                 "querySelector" or "querySelectorAll" => LeadingId(literal.Value),
                 _ => null,
             };
-            if (string.IsNullOrEmpty(id) || ids.Contains(id) || model.Ids.MayExist(id)) continue;
+            if (string.IsNullOrEmpty(id) || ids.Contains(id) || page.TemplateIds.Contains(id) || model.Ids.MayExist(id)) continue;
             var at = At(page, call.Unit, literal);
             drafts.Add(new Draft(FindingKinds.MissingId, Fields(("id", id), ("line", at.Line), ("column", at.Column)), null, at));
         }

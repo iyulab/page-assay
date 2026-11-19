@@ -14,7 +14,7 @@ internal sealed record EarlyRead(Binding Binding, Identifier Read, CodeUnit Unit
 /// <c>&lt;body onload&gt;</c> handler registered by then; functions run at once (an IIFE) and calls to functions whose value the
 /// source states. What it does not follow, so as never to report a read that does not happen: callbacks handed to other code
 /// (timers, other events, array methods), an async function past its first <c>await</c>, generator bodies, and the branches of a
-/// condition that tests <c>typeof</c>. Both branches of other conditions are followed.
+/// condition that tests <c>typeof</c> or <c>document.readyState</c>. Both branches of other conditions are followed.
 /// </summary>
 internal sealed class StartOrder
 {
@@ -55,7 +55,7 @@ internal sealed class StartOrder
             order.Enter(scope);
             order.RunProgram(unit, scope, async: true);
         }
-        foreach (var unit in units.Where(u => u.Handler is { Event: "onload", Selector: "body" }))
+        foreach (var unit in units.Where(u => u.Handler is { Event: "onload", Tag: "body" }))
         {
             var scope = model.ScopeOf(unit.Ast);
             order.Enter(scope);
@@ -122,7 +122,7 @@ internal sealed class StartOrder
                 return false;
             case IfStatement i:
                 Eval(i.Test, scope);
-                if (!TestsTypeOf(i.Test))
+                if (!Guarded(i.Test))
                 {
                     Run(i.Consequent, scope);
                     Run(i.Alternate, scope);
@@ -287,11 +287,11 @@ internal sealed class StartOrder
                 return;
             case LogicalExpression l:
                 Eval(l.Left, scope);
-                if (!TestsTypeOf(l.Left)) Eval(l.Right, scope);
+                if (!Guarded(l.Left)) Eval(l.Right, scope);
                 return;
             case ConditionalExpression c:
                 Eval(c.Test, scope);
-                if (!TestsTypeOf(c.Test))
+                if (!Guarded(c.Test))
                 {
                     Eval(c.Consequent, scope);
                     Eval(c.Alternate, scope);
@@ -431,11 +431,14 @@ internal sealed class StartOrder
         Found.Add(new EarlyRead(binding, id, unit, _call == binding.Name ? null : _call, throws));
     }
 
-    private static bool TestsTypeOf(Node? node) => node switch
+    // A condition whose outcome the page decides at run time on purpose: it tests typeof, or document.readyState (an inline
+    // script always runs while the document is loading, so «if loading, wait; else run now» never takes the second branch at start).
+    private static bool Guarded(Node? node) => node switch
     {
         null => false,
         UnaryExpression { Operator: Operator.TypeOf } => true,
+        MemberExpression { Computed: false, Property: Identifier { Name: "readyState" } } => true,
         FunctionExpression or ArrowFunctionExpression => false,
-        _ => node.ChildNodes.Any(TestsTypeOf),
+        _ => node.ChildNodes.Any(Guarded),
     };
 }

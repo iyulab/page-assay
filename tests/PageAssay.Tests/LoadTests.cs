@@ -27,6 +27,25 @@ public sealed class LoadTests(BrowserFixture fixture) : IClassFixture<BrowserFix
         Assert.False((bool)report.ToJson()["context"]!["static"]!);
     }
 
+    // The static half against the browser: a script the static rules call broken does not parse in Chrome, and a read they say
+    // throws does throw there — and the reverse, on the forms most likely to disagree.
+    [Theory]
+    [InlineData("<script>const re = /(?<y>\\d{4})-(?<=a)b/u; const s = /[\\p{L}--\\p{Ll}]/v; re.test(''); s.test('');</script>", false, false)]
+    [InlineData("<script>const re = /a{2,1}/;</script>", true, false)]
+    [InlineData("<script>let let = 1;</script>", true, false)]
+    [InlineData("<script>init();\nconst items = [];\nfunction init() { return items.length; }</script>", false, true)]
+    [InlineData("<script>if (document.readyState === 'loading') addEventListener('DOMContentLoaded', init); else init();\nconst items = [];\nfunction init() { return items.length; }</script>", false, false)]
+    [InlineData("<script>boot();</script><script>function boot() {}</script>", false, true)]
+    public async Task Static_syntax_and_throwing_reads_agree_with_the_browser(string html, bool broken, bool throws)
+    {
+        var report = await Run(_site.Page("index.html", "<!doctype html>" + html));
+        var uncaught = report.Findings.Where(f => f.Kind == FindingKinds.Uncaught).Select(f => f.Fields["message"]!.ToString()).ToList();
+        Assert.Equal(broken, report.Findings.Any(f => f.Kind == FindingKinds.Syntax));
+        Assert.Equal(broken, uncaught.Any(m => m.StartsWith("SyntaxError", StringComparison.Ordinal)));
+        Assert.Equal(throws, report.Findings.Any(f => f.Kind == FindingKinds.ReadBeforeSet && (bool)f.Fields["throws"]!));
+        Assert.Equal(throws, uncaught.Any(m => m.StartsWith("ReferenceError", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public async Task A_clean_page_loads_settles_and_finds_nothing()
     {

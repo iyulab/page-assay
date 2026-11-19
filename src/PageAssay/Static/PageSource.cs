@@ -18,9 +18,9 @@ internal sealed record InlineScript(int Number, string Code, bool Module, Source
     public string Hash { get; } = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Code)))[..12];
 }
 
-/// <summary>An event-handler attribute (<c>onclick="…"</c>): its name, its code, its element's selector (in the shape the driven
-/// half uses), what identifies the element across versions (its id, else its label, else its selector), and where the code is.</summary>
-internal sealed record HandlerAttribute(string Event, string Code, string Selector, string Anchor, SourceSpan Span);
+/// <summary>An event-handler attribute (<c>onclick="…"</c>): its name, its code, its element's tag and selector (in the shape the
+/// driven half uses), what identifies the element across versions (its id, else its label, else its selector), and where the code is.</summary>
+internal sealed record HandlerAttribute(string Event, string Code, string Tag, string Selector, string Anchor, SourceSpan Span);
 
 /// <summary>A URL the markup asks for (an attribute or a CSS reference), with the rule it falls under.</summary>
 internal sealed record MarkupUrl(string Rule, string Url, bool Code, int Offset);
@@ -62,6 +62,9 @@ internal sealed class PageSource
     public List<ElementId> Ids { get; } = [];
     public List<StyleText> Styles { get; } = [];
 
+    /// <summary>Ids inside a <c>&lt;template&gt;</c>: not in the document, but there once the code clones the template in.</summary>
+    public HashSet<string> TemplateIds { get; } = new(StringComparer.Ordinal);
+
     /// <summary>The page loads a script from a file, which the static rules do not read: the names it defines are unknown.</summary>
     public bool HasScriptFiles { get; private set; }
 
@@ -84,7 +87,8 @@ internal sealed class PageSource
 
     public static PageSource Parse(string html)
     {
-        var text = html.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        // A byte-order mark is not a column of the first line in an editor.
+        var text = html.TrimStart('\uFEFF').Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
         var page = new PageSource(text);
         var document = new HtmlParser(new HtmlParserOptions { IsKeepingSourceReferences = true, IsScripting = true })
             .ParseDocument(text);
@@ -94,6 +98,8 @@ internal sealed class PageSource
             var tag = StartTag.At(text, element);
             if (element.LocalName == "script")
                 page.ReadScript(element, tag, ++scriptNumber);
+            if (element is AngleSharp.Html.Dom.IHtmlTemplateElement template)
+                foreach (var inner in template.Content.QuerySelectorAll("[id]")) page.TemplateIds.Add(inner.Id!);
             if (element.LocalName == "style" && tag is not null)
                 page.Styles.Add(new StyleText(element.TextContent, ContentSpan(text, tag, element.TextContent)));
             if (element.Id is { Length: > 0 } id)
@@ -103,7 +109,8 @@ internal sealed class PageSource
                 var name = attribute.LocalName;
                 var span = tag?.SpanOf(name, attribute.Value) ?? new SourceSpan(tag?.Offset ?? 0, false);
                 if (name.StartsWith("on", StringComparison.Ordinal) && name.Length > 2)
-                    page.Handlers.Add(new HandlerAttribute(name, attribute.Value, Selectors.Of(element), Selectors.AnchorOf(element), span));
+                    page.Handlers.Add(new HandlerAttribute(name, attribute.Value, element.LocalName, Selectors.Of(element),
+                        Selectors.AnchorOf(element), span));
                 else if (name == "style")
                     page.Styles.Add(new StyleText(attribute.Value, span));
                 else if (RuleOf(element, name) is { } rule)

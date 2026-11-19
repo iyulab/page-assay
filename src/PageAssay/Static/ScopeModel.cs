@@ -129,7 +129,7 @@ internal sealed class ScopeModel
     /// <summary>Names made global by assignment: <c>window.x = …</c>, or an assignment to a name declared nowhere.</summary>
     public HashSet<string> AssignedGlobals { get; } = new(StringComparer.Ordinal);
 
-    /// <summary>Names some code tests with <c>typeof</c>: the page knows they may be missing.</summary>
+    /// <summary>Names some code tests with <c>typeof</c> or reads as <c>window.x</c>: the page knows they may be missing.</summary>
     public HashSet<string> TypeOfNames { get; } = new(StringComparer.Ordinal);
 
     /// <summary>Ids the code gives elements it makes (<c>el.id = "x"</c>, <c>setAttribute("id", "x")</c>, <c>id="x"</c> in markup
@@ -268,6 +268,9 @@ internal sealed class ScopeModel
                     return;
                 }
                 case MemberExpression m:
+                    if (!declaring && m is { Computed: false, Object: Identifier { Name: "window" or "globalThis" or "self" } host, Property: Identifier probed }
+                        && scope.Lookup(host.Name) is null)
+                        model.TypeOfNames.Add(probed.Name);
                     Visit(m.Object, scope);
                     if (m.Computed) Visit(m.Property, scope);
                     return;

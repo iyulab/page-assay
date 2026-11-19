@@ -179,6 +179,27 @@ public sealed class StaticTests
     }
 
     [Fact]
+    public void A_module_that_imports_a_file_or_a_name_read_through_window_turns_undefined_call_off_for_it()
+    {
+        Assert.Empty(Run("<button onclick=\"save()\">Save</button><script type=\"module\">import './app.js';</script>").Findings);
+        Assert.Empty(Run("<script>if (window.analytics) analytics();</script>").Findings);
+    }
+
+    [Fact]
+    public void A_parameter_of_the_same_name_elsewhere_does_not_make_a_call_not_global()
+    {
+        var finding = Assert.Single(Run("<script>function run(render) { return render; } render();</script>").Findings);
+        Assert.Equal("undefined", Str(finding, "reason"));
+    }
+
+    [Fact]
+    public void A_byte_order_mark_is_not_a_column()
+    {
+        var finding = Assert.Single(Run("\uFEFF<script>nope();</script>").Findings);
+        Assert.Equal(9, Int(finding, "column"));
+    }
+
+    [Fact]
     public void Parameters_and_locals_shadow_and_a_call_through_a_member_is_not_judged()
     {
         Assert.Empty(Run("""
@@ -224,6 +245,18 @@ public sealed class StaticTests
             document.getElementById('first'); document.getElementById('row-3'); document.querySelector('#total');
             </script>
             """).Findings, f => f.Kind == FindingKinds.MissingId);
+    }
+
+    [Fact]
+    public void Ids_inside_a_template_are_there_once_the_code_clones_it()
+    {
+        Assert.Empty(Run("""
+            <template id="row"><li><span id="count"></span></li></template><ul id="list"></ul>
+            <script>
+            list.append(document.getElementById('row').content.cloneNode(true));
+            document.getElementById('count').textContent = '1';
+            </script>
+            """).Findings);
     }
 
     [Fact]
@@ -419,6 +452,29 @@ public sealed class StaticTests
             async function load() { await fetch('x.json'); return items.length; }
             load();
             const items = [];
+            </script>
+            """).Findings);
+    }
+
+    [Fact]
+    public void A_body_onload_handler_runs_after_every_script()
+    {
+        var report = Run("<body onload=\"start()\">\n<script>\nfunction start() { return ready.length; }\nvar ready;\n</script>");
+        Assert.Empty(report.Findings);
+        // It is followed: what it calls runs, in its own order.
+        var early = Assert.Single(Run("<body onload=\"start()\">\n<script>\nfunction start() { use(); const v = 1; function use() { return v; } }\n</script>").Findings);
+        Assert.Equal("v", Str(early, "name"));
+        Assert.Equal("start", Str(early, "call"));
+    }
+
+    [Fact]
+    public void A_ready_state_test_is_a_guard_whose_branches_are_not_followed()
+    {
+        Assert.Empty(Run("""
+            <script>
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+            const items = [];
+            function init() { return items.length; }
             </script>
             """).Findings);
     }
