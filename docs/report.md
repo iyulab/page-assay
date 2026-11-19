@@ -85,11 +85,14 @@ and every `on…` attribute. A script with a `src` is not read, and a `<template
   (`tools/browser-names.html`). Element ids are not assumed to be globals.
 - **Handler attributes** run as functions whose scope reaches, before the globals, their element, its form and the document: a
   handler may call `submit()`, `focus()` or `getElementById(…)` unqualified, and may `return`.
-- **What turns `undefined-call` off.** A page that loads a script from a file (its names are unknown), and code that uses `eval` or
-  `with` (what a name refers to cannot be read from the source), are not checked for it; a name the page tests with `typeof` is
-  one it knows may be missing, and is not reported.
+- **What turns `undefined-call` off.** A page that loads a script from a file — a `src`, or a module an inline module imports — (its
+  names are unknown), and code that uses `eval` or `with` (what a name refers to cannot be read from the source), are not checked
+  for it; a name the page tests with `typeof` or reads as `window.x` is one it knows may be missing, and is not reported. The
+  handler scope is the union of what common elements, a form and the document offer, so a handler is never faulted for a name
+  its own element might have.
 - **Ids the code makes.** `missing-id` counts an id as present when the code gives one — `el.id = "x"`, `setAttribute("id", "x")`,
-  `id="x"` in a string or template the code holds (markup it inserts), or the literal start of one (`"row-" + n` covers `row-3`).
+  `id="x"` in a string or template the code holds (markup it inserts), or the literal start of one (`"row-" + n` covers `row-3`) —
+  and the ids inside a `<template>`, there once the code clones it in (they are not counted by `duplicate-id`).
   When the code gives an id the source does not spell out (`el.id = f()`), the rule does not run.
 - **The order `read-before-set` follows** — what runs while the page starts: the top level of classic scripts in document order
   (functions declared in a script have their value from its start — a function declared later in the same script but only called
@@ -98,7 +101,8 @@ and every `on…` attribute. A script with a `src` is not read, and a `<template
   functions run at once (an IIFE, `f.call(…)`) and calls to a function whose value the source states (a declaration, or
   `const f = () => …` once it is set) are followed. What is **not** followed, so as never to report a read that does not happen:
   callbacks handed to other code (timers, other events, array methods), an async function past its first `await`, generator
-  bodies, the branches of a condition that tests `typeof`; and a `var` read by its own initializer (`var x = x || {}`) or never
+  bodies, the branches of a condition that tests `typeof` or `document.readyState` (an inline script always runs while the
+  document loads, so «wait if loading, else run now» never runs now); and a `var` read by its own initializer (`var x = x || {}`) or never
   given a value at all is not reported. Both branches of any other condition are followed.
 
 A broken script is reported **once, as its cause**: when a script does not parse, the names it would have defined are not also
@@ -130,7 +134,8 @@ run that is not told the origin the page will be served on counts every absolute
 `false`, a file, a style or a form target does not (the page runs, without it).
 
 A driven run reports the same request again when the page makes it (`blocked`): the static finding says the source asks for it,
-the driven one that the request was made and refused. The two are not merged.
+the driven one that the request was made and refused. The two are not merged — nor are a `syntax` finding and the driven
+`uncaught` SyntaxError of the same script, or an `undefined-call` and the ReferenceError it throws in use.
 
 Shared fields:
 
