@@ -5,6 +5,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-21
+
 ### Added
 - `PageAssay`, the first package: `Assayer.RunAsync` drives a page in a headless Chrome, Edge or Chromium over the Chrome DevTools
   Protocol (or an endpoint the caller owns) in every viewport and colour scheme, and reports uncaught errors, unhandled
