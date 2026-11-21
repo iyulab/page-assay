@@ -8,6 +8,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Added
 - Releases are published to nuget.org by a workflow that runs when the declared version changes: it builds, tests and packs,
   hands the packages to the organization's central publisher, and tags the version once the publish succeeds.
+- Every pushed branch and pull request is built and tested (`ci.yml`), so a topic branch carries a check result for its head
+  before it is merged; it uploads nothing.
 
 ## [0.1.0] - 2026-11-21
 
